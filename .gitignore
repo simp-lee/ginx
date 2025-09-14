@@ -1,0 +1,4 @@
+*.exe
+coverage.*
+.vscode/
+极简架构设计.md
