@@ -2,14 +2,13 @@ module github.com/simp-lee/ginx
 
 go 1.24.0
 
-toolchain go1.24.6
-
 require (
 	github.com/gin-gonic/gin v1.10.1
 	github.com/simp-lee/jwt v0.0.0-20250828085346-eaff03b62c6f
 	github.com/simp-lee/logger v0.0.0-20250910071002-ca7c36490aec
 	github.com/simp-lee/rbac v0.0.0-20250901135442-290bb69b6ba9
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/time v0.13.0
 )
 
 require (
