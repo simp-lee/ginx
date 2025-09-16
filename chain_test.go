@@ -1,6 +1,7 @@
 package ginx
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
@@ -52,7 +53,7 @@ func TestChainExecution(t *testing.T) {
 		handler := chain.Build()
 
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("test", true) // 设置一些测试数据
+		c.Set("test", true) // Set some test data
 
 		handler(c)
 
@@ -75,7 +76,7 @@ func TestChainExecution(t *testing.T) {
 		c, _ := TestContext("GET", "/test", nil)
 		handler(c)
 
-		// 中间件应该按添加顺序执行
+		// Middleware should execute in the order they were added
 		expected := []string{"middleware1", "middleware2", "middleware3"}
 		if !AssertSliceEqual(expected, executed) {
 			t.Errorf("Expected execution order %v, got %v", expected, executed)
@@ -91,12 +92,12 @@ func TestChainExecution(t *testing.T) {
 
 		handler := chain.Build()
 
-		// 创建一个模拟的 gin 引擎来测试
+		// Create a mock gin engine for testing
 		gin.SetMode(gin.TestMode)
 		r := gin.New()
 		r.GET("/test", handler, TestHandler(&executed))
 
-		// 这里我们只测试链构建是否成功
+		// We only test if the chain builds successfully
 		if handler == nil {
 			t.Error("Chain.Build() should return a valid handler")
 		}
@@ -174,14 +175,14 @@ func TestChainComplexScenarios(t *testing.T) {
 		var executed []string
 
 		chain := NewChain().
-			Use(TestMiddleware("cors", &executed)).                          // 总是执行
-			When(PathHasPrefix("/api"), TestMiddleware("auth", &executed)).  // 只在 API 路径执行
-			Unless(PathIs("/health"), TestMiddleware("logging", &executed)). // 除了健康检查都执行
-			Use(TestMiddleware("response", &executed))                       // 总是执行
+			Use(TestMiddleware("cors", &executed)).                          // Always executed
+			When(PathHasPrefix("/api"), TestMiddleware("auth", &executed)).  // Only executed for API paths
+			Unless(PathIs("/health"), TestMiddleware("logging", &executed)). // Executed for all except health check
+			Use(TestMiddleware("response", &executed))                       // Always executed
 
 		handler := chain.Build()
 
-		// 测试 API 路径
+		// Test API path
 		c, _ := TestContext("GET", "/api/users", nil)
 		handler(c)
 
@@ -205,7 +206,7 @@ func TestChainComplexScenarios(t *testing.T) {
 		c, _ := TestContext("GET", "/health", nil)
 		handler(c)
 
-		// /health 路径：cors 执行，auth 不执行（不是 /api），logging 不执行（被 Unless 排除），response 执行
+		// /health path: cors executes, auth doesn't execute (not /api), logging doesn't execute (excluded by Unless), response executes
 		expected := []string{"cors", "response"}
 		if !AssertSliceEqual(expected, executed) {
 			t.Errorf("Health path: expected %v, got %v", expected, executed)
@@ -215,7 +216,7 @@ func TestChainComplexScenarios(t *testing.T) {
 	t.Run("Complex conditions with And/Or", func(t *testing.T) {
 		var executed []string
 
-		// 复杂条件：(API 路径 AND POST 方法) OR 管理员路径
+		// Complex condition: (API path AND POST method) OR admin path
 		complexCondition := Or(
 			And(PathHasPrefix("/api"), MethodIs("POST")),
 			PathHasPrefix("/admin"),
@@ -226,7 +227,7 @@ func TestChainComplexScenarios(t *testing.T) {
 
 		handler := chain.Build()
 
-		// 测试 1: API POST 请求
+		// Test 1: API POST request
 		c1, _ := TestContext("POST", "/api/users", nil)
 		handler(c1)
 
@@ -234,10 +235,10 @@ func TestChainComplexScenarios(t *testing.T) {
 			t.Error("Complex condition: API POST should trigger security middleware")
 		}
 
-		// 重置执行记录
+		// Reset execution record
 		executed = []string{}
 
-		// 测试 2: 管理员路径
+		// Test 2: Admin path
 		c2, _ := TestContext("GET", "/admin/dashboard", nil)
 		handler(c2)
 
@@ -245,10 +246,10 @@ func TestChainComplexScenarios(t *testing.T) {
 			t.Error("Complex condition: Admin path should trigger security middleware")
 		}
 
-		// 重置执行记录
+		// Reset execution record
 		executed = []string{}
 
-		// 测试 3: 普通 API GET 请求（不应触发）
+		// Test 3: Regular API GET request (should not trigger)
 		c3, _ := TestContext("GET", "/api/users", nil)
 		handler(c3)
 
@@ -261,7 +262,7 @@ func TestChainComplexScenarios(t *testing.T) {
 func TestChainErrorHandler(t *testing.T) {
 	t.Run("OnError sets error handler", func(t *testing.T) {
 		errorHandler := func(c *gin.Context, err error) {
-			// 错误处理逻辑
+			// Error handling logic
 		}
 
 		chain := NewChain().OnError(errorHandler)
@@ -270,8 +271,8 @@ func TestChainErrorHandler(t *testing.T) {
 			t.Error("OnError should set the error handler")
 		}
 
-		// 注意：errorHandler 的实际使用需要在具体的中间件中实现
-		// 这里只测试设置是否成功
+		// Note: The actual usage of errorHandler needs to be implemented in specific middleware
+		// Here we only test if the setting is successful
 	})
 
 	t.Run("OnError returns chain for method chaining", func(t *testing.T) {
@@ -289,7 +290,7 @@ func TestChainMethodChaining(t *testing.T) {
 	t.Run("All methods support chaining", func(t *testing.T) {
 		var executed []string
 
-		// 测试所有方法都支持链式调用
+		// Test that all methods support method chaining
 		chain := NewChain().
 			OnError(func(c *gin.Context, err error) {}).
 			Use(TestMiddleware("middleware1", &executed)).
@@ -303,11 +304,11 @@ func TestChainMethodChaining(t *testing.T) {
 			t.Error("Chain method chaining should work correctly")
 		}
 
-		// 验证链式调用创建的处理器能正常工作
+		// Verify that the handler created by method chaining works properly
 		c, _ := TestContext("GET", "/api/test", nil)
 		handler(c)
 
-		// 应该执行：middleware1, auth, logging, middleware2
+		// Should execute: middleware1, auth, logging, middleware2
 		expected := []string{"middleware1", "auth", "logging", "middleware2"}
 		if !AssertSliceEqual(expected, executed) {
 			t.Errorf("Method chaining result: expected %v, got %v", expected, executed)
@@ -322,22 +323,127 @@ func TestChainEdgeCases(t *testing.T) {
 
 		c, _ := TestContext("GET", "/test", nil)
 
-		// 应该不会 panic
+		// Should not panic
 		handler(c)
 
-		// 验证请求状态
+		// Verify request status
 		if c.Writer.Status() != http.StatusOK {
-			// 注意：空链可能不会设置状态码，这是正常的
+			// Note: Empty chain may not set status code, this is normal
 		}
 	})
 
 	t.Run("Nil condition handling", func(t *testing.T) {
-		// 这个测试确保我们的实现能正确处理边界情况
+		// This test ensures our implementation can correctly handle edge cases
 		chain := NewChain()
 		handler := chain.Build()
 
 		if handler == nil {
 			t.Error("Build should always return a valid handler function")
+		}
+	})
+}
+
+func TestChainErrorHandlerExecution(t *testing.T) {
+	t.Run("ErrorHandler should be called when middleware reports error", func(t *testing.T) {
+		var errorHandlerCalled bool
+		var capturedError error
+
+		// Create a middleware that reports errors
+		errorMiddleware := func(next gin.HandlerFunc) gin.HandlerFunc {
+			return func(c *gin.Context) {
+				// Simulate an error in middleware
+				err := errors.New("middleware error")
+				c.Error(err)
+				next(c)
+			}
+		}
+
+		// Set up error handler
+		chain := NewChain().
+			OnError(func(c *gin.Context, err error) {
+				errorHandlerCalled = true
+				capturedError = err
+			}).
+			Use(errorMiddleware)
+
+		handler := chain.Build()
+		c, _ := TestContext("GET", "/test", nil)
+
+		handler(c)
+
+		// In the current implementation, errorHandler will not be called
+		// This test should fail, proving the problem exists
+		if !errorHandlerCalled {
+			t.Error("ErrorHandler was not called despite middleware reporting an error - this demonstrates the bug")
+		}
+		if capturedError == nil {
+			t.Error("ErrorHandler should have received the error from middleware")
+		}
+	})
+
+	t.Run("ErrorHandler should not be called when no errors occur", func(t *testing.T) {
+		var errorHandlerCalled bool
+
+		// Create a normal middleware
+		normalMiddleware := func(next gin.HandlerFunc) gin.HandlerFunc {
+			return func(c *gin.Context) {
+				next(c)
+			}
+		}
+
+		chain := NewChain().
+			OnError(func(c *gin.Context, err error) {
+				errorHandlerCalled = true
+			}).
+			Use(normalMiddleware)
+
+		handler := chain.Build()
+		c, _ := TestContext("GET", "/test", nil)
+
+		handler(c)
+
+		if errorHandlerCalled {
+			t.Error("ErrorHandler should not be called when no errors occur")
+		}
+	})
+
+	t.Run("ErrorHandler should handle multiple errors correctly", func(t *testing.T) {
+		var errorHandlerCallCount int
+		var capturedErrors []error
+
+		// Create multiple middlewares that report errors
+		errorMiddleware1 := func(next gin.HandlerFunc) gin.HandlerFunc {
+			return func(c *gin.Context) {
+				err := errors.New("first error")
+				c.Error(err)
+				next(c)
+			}
+		}
+
+		errorMiddleware2 := func(next gin.HandlerFunc) gin.HandlerFunc {
+			return func(c *gin.Context) {
+				err := errors.New("second error")
+				c.Error(err)
+				next(c)
+			}
+		}
+
+		chain := NewChain().
+			OnError(func(c *gin.Context, err error) {
+				errorHandlerCallCount++
+				capturedErrors = append(capturedErrors, err)
+			}).
+			Use(errorMiddleware1).
+			Use(errorMiddleware2)
+
+		handler := chain.Build()
+		c, _ := TestContext("GET", "/test", nil)
+
+		handler(c)
+
+		// Expect error handler to be called and handle the last error
+		if errorHandlerCallCount == 0 {
+			t.Error("ErrorHandler was not called despite multiple middleware errors - this demonstrates the bug")
 		}
 	})
 }

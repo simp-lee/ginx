@@ -72,5 +72,11 @@ func (c *Chain) Build() gin.HandlerFunc {
 
 		// Execute the middleware chain
 		handler(ctx)
+
+		// Check for errors after middleware chain execution
+		if c.errorHandler != nil && len(ctx.Errors) > 0 {
+			// Call error handler with the last error
+			c.errorHandler(ctx, ctx.Errors.Last().Err)
+		}
 	}
 }
