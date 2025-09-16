@@ -639,3 +639,121 @@ func TestCache_PathBasedStrategies(t *testing.T) {
 	r.ServeHTTP(w5, req5)
 	assert.False(t, cache.Has("/admin/stats"))
 }
+
+func TestCache_HeadersSetCorrectlyOnCacheHit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cache := shardedcache.NewCache(shardedcache.Options{
+		MaxSize:           100,
+		DefaultExpiration: time.Minute,
+		ShardCount:        4,
+	})
+
+	r := gin.New()
+	r.Use(NewChain().Use(Cache(cache)).Build())
+
+	r.GET("/headers-test", func(c *gin.Context) {
+		c.Header("X-Custom-Header", "custom-value")
+		c.Header("Content-Type", "application/json")
+		c.Header("Cache-Control", "max-age=3600")
+		c.JSON(200, gin.H{"message": "test"})
+	})
+
+	// First request - populates cache
+	req1 := httptest.NewRequest("GET", "/headers-test", nil)
+	w1 := httptest.NewRecorder()
+	r.ServeHTTP(w1, req1)
+
+	assert.Equal(t, 200, w1.Code)
+	assert.Equal(t, "custom-value", w1.Header().Get("X-Custom-Header"))
+	assert.Equal(t, "application/json", w1.Header().Get("Content-Type"))
+	assert.Equal(t, "max-age=3600", w1.Header().Get("Cache-Control"))
+
+	// Second request - should hit cache and return same headers
+	req2 := httptest.NewRequest("GET", "/headers-test", nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+
+	assert.Equal(t, 200, w2.Code)
+	assert.Equal(t, "custom-value", w2.Header().Get("X-Custom-Header"))
+	assert.Equal(t, "application/json", w2.Header().Get("Content-Type"))
+	assert.Equal(t, "max-age=3600", w2.Header().Get("Cache-Control"))
+	assert.Equal(t, w1.Body.String(), w2.Body.String())
+}
+
+func TestCache_RespectsHTTPSemantics(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name           string
+		setupHandler   func(c *gin.Context)
+		shouldBeCached bool
+		description    string
+	}{
+		{
+			name: "should_not_cache_no_store",
+			setupHandler: func(c *gin.Context) {
+				c.Header("Cache-Control", "no-store")
+				c.JSON(200, gin.H{"message": "not cacheable"})
+			},
+			shouldBeCached: false,
+			description:    "Responses with Cache-Control: no-store should not be cached",
+		},
+		{
+			name: "should_not_cache_private",
+			setupHandler: func(c *gin.Context) {
+				c.Header("Cache-Control", "private, max-age=3600")
+				c.JSON(200, gin.H{"message": "private data"})
+			},
+			shouldBeCached: false,
+			description:    "Responses with Cache-Control: private should not be cached",
+		},
+		{
+			name: "should_not_cache_with_set_cookie",
+			setupHandler: func(c *gin.Context) {
+				c.SetCookie("session", "abc123", 3600, "/", "", false, true)
+				c.JSON(200, gin.H{"message": "user session"})
+			},
+			shouldBeCached: false,
+			description:    "Responses with Set-Cookie should not be cached",
+		},
+		{
+			name: "should_cache_normal_response",
+			setupHandler: func(c *gin.Context) {
+				c.Header("Cache-Control", "public, max-age=3600")
+				c.JSON(200, gin.H{"message": "cacheable"})
+			},
+			shouldBeCached: true,
+			description:    "Normal responses should be cached",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := shardedcache.NewCache(shardedcache.Options{
+				MaxSize:           100,
+				DefaultExpiration: time.Minute,
+				ShardCount:        4,
+			})
+
+			r := gin.New()
+			r.Use(NewChain().Use(Cache(cache)).Build())
+
+			r.GET("/test", tt.setupHandler)
+
+			// First request
+			req := httptest.NewRequest("GET", "/test", nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			assert.Equal(t, 200, w.Code, tt.description)
+
+			// Check if response was cached
+			if tt.shouldBeCached {
+				assert.True(t, cache.Has("/test"), "Response should be cached: %s", tt.description)
+			} else {
+				assert.False(t, cache.Has("/test"), "Response should not be cached: %s", tt.description)
+			}
+		})
+	}
+}

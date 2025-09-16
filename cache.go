@@ -1,6 +1,8 @@
 package ginx
 
 import (
+	"strings"
+
 	"github.com/gin-gonic/gin"
 	shardedcache "github.com/simp-lee/cache"
 )
@@ -46,11 +48,11 @@ func cacheWithGroup(cache shardedcache.CacheInterface, groupName string) Middlew
 			}
 
 			if exists {
-				// Set status code, then headers, then write body
-				c.Writer.WriteHeader(response.StatusCode)
+				// Set headers first, then status code, then write body
 				for k, v := range response.Headers {
 					c.Writer.Header().Set(k, v)
 				}
+				c.Writer.WriteHeader(response.StatusCode)
 				c.Writer.Write(response.Body)
 				c.Abort()
 				return
@@ -111,6 +113,20 @@ func (w *responseWriter) cacheResponse() {
 	}
 	w.cached = true
 
+	// Check Cache-Control directives - respect HTTP semantics
+	cacheControl := w.Header().Get("Cache-Control")
+	if cacheControl != "" {
+		// Don't cache responses with no-store or private directives
+		if contains(cacheControl, "no-store") || contains(cacheControl, "private") {
+			return
+		}
+	}
+
+	// Don't cache responses with Set-Cookie header to avoid user-specific data leakage
+	if w.Header().Get("Set-Cookie") != "" {
+		return
+	}
+
 	// Copy response headers
 	headers := make(map[string]string)
 	for k, v := range w.Header() {
@@ -138,4 +154,12 @@ func generateCacheKey(c *gin.Context) string {
 		return c.Request.URL.Path + "?" + c.Request.URL.RawQuery
 	}
 	return c.Request.URL.Path
+}
+
+// contains checks if a string contains any of the cache control directives
+func contains(cacheControl, directive string) bool {
+	// Simple case-insensitive substring check for cache control directives
+	// In production, you might want more sophisticated parsing
+	lower := strings.ToLower(cacheControl)
+	return strings.Contains(lower, strings.ToLower(directive))
 }
