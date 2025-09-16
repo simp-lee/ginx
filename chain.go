@@ -2,26 +2,26 @@ package ginx
 
 import "github.com/gin-gonic/gin"
 
-// Chain 表示中间件链
+// Chain is a middleware chain builder for Gin
 type Chain struct {
 	middlewares  []Middleware
 	errorHandler ErrorHandler
 }
 
-// NewChain 创建一个新的中间件链
+// NewChain creates a new Chain instance
 func NewChain() *Chain {
 	return &Chain{
 		middlewares: make([]Middleware, 0),
 	}
 }
 
-// Use 添加一个中间件到链中
+// Use adds a middleware to the chain
 func (c *Chain) Use(m Middleware) *Chain {
 	c.middlewares = append(c.middlewares, m)
 	return c
 }
 
-// When 当条件为真时，添加中间件到链中
+// When adds middleware to the chain if the condition is true
 func (c *Chain) When(cond Condition, m Middleware) *Chain {
 	conditionalMiddleware := func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(ctx *gin.Context) {
@@ -36,7 +36,7 @@ func (c *Chain) When(cond Condition, m Middleware) *Chain {
 	return c
 }
 
-// Unless 当条件为假时，添加中间件到链中
+// Unless adds middleware to the chain if the condition is false
 func (c *Chain) Unless(cond Condition, m Middleware) *Chain {
 	conditionalMiddleware := func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(ctx *gin.Context) {
@@ -51,26 +51,26 @@ func (c *Chain) Unless(cond Condition, m Middleware) *Chain {
 	return c
 }
 
-// OnError 设置错误处理器
+// OnError sets the error handler for the chain
 func (c *Chain) OnError(handler ErrorHandler) *Chain {
 	c.errorHandler = handler
 	return c
 }
 
-// Build 构建最终的 gin.HandlerFunc
+// Build builds the final gin.HandlerFunc
 func (c *Chain) Build() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		// 创建执行链
+		// Create the execution chain
 		handler := func(ctx *gin.Context) {
 			ctx.Next()
 		}
 
-		// 从后往前应用中间件
+		// Apply middleware from last to first
 		for i := len(c.middlewares) - 1; i >= 0; i-- {
 			handler = c.middlewares[i](handler)
 		}
 
-		// 执行中间件链
+		// Execute the middleware chain
 		handler(ctx)
 	}
 }

@@ -44,7 +44,7 @@ func WithTimeoutMessage(message string) Option[TimeoutConfig] {
 	}
 }
 
-// Timeout 返回我们的 Middleware 类型，用于 Chain 和条件逻辑
+// Timeout middleware to set a timeout for requests.
 func Timeout(options ...Option[TimeoutConfig]) Middleware {
 	config := defaultTimeoutConfig()
 	for _, option := range options {
@@ -53,45 +53,44 @@ func Timeout(options ...Option[TimeoutConfig]) Middleware {
 
 	return func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
-			// 创建超时上下文
 			ctx, cancel := context.WithTimeout(c.Request.Context(), config.Timeout)
 			defer cancel()
 
-			// 设置新的上下文到请求中
+			// Set the new context to the request
 			c.Request = c.Request.WithContext(ctx)
 
-			// 用于通知处理完成的 channel
+			// Channel to notify when processing is complete
 			finish := make(chan struct{}, 1)
 
 			go func() {
 				defer func() {
 					if err := recover(); err != nil {
-						// 通知处理完成（即使发生panic）
+						// Notify that processing is complete (even if a panic occurred)
 						select {
 						case finish <- struct{}{}:
 						default:
 						}
-						// 重新抛出 panic
+						// Re-throw panic
 						panic(err)
 					}
-					// 通知处理完成
+					// Notify that processing is complete
 					select {
 					case finish <- struct{}{}:
 					default:
 					}
 				}()
 
-				// 执行下一个处理器
+				// Execute the next handler
 				next(c)
 			}()
 
-			// 等待处理完成或超时
+			// Wait for processing to complete or timeout
 			select {
 			case <-finish:
-				// 处理完成，正常返回
+				// Processing complete, return normally
 				return
 			case <-ctx.Done():
-				// 超时了，返回超时响应
+				// Timeout occurred, return timeout response
 				c.AbortWithStatusJSON(http.StatusRequestTimeout, config.Response)
 				return
 			}

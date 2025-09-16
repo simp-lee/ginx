@@ -8,9 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// 逻辑组合函数
+// Logical combinators for conditions
 
-// And 逻辑与，所有条件都必须为真
+// And all conditions must be true
 func And(conds ...Condition) Condition {
 	return func(c *gin.Context) bool {
 		for _, cond := range conds {
@@ -22,7 +22,7 @@ func And(conds ...Condition) Condition {
 	}
 }
 
-// Or 逻辑或，任一条件为真即可
+// Or at least one condition is true
 func Or(conds ...Condition) Condition {
 	return func(c *gin.Context) bool {
 		for _, cond := range conds {
@@ -34,16 +34,16 @@ func Or(conds ...Condition) Condition {
 	}
 }
 
-// Not 逻辑非，条件取反
+// Not all conditions must be false
 func Not(cond Condition) Condition {
 	return func(c *gin.Context) bool {
 		return !cond(c)
 	}
 }
 
-// 路径条件函数
+// Path conditions
 
-// PathIs 路径精确匹配
+// PathIs exact path match
 func PathIs(paths ...string) Condition {
 	return func(c *gin.Context) bool {
 		currentPath := c.Request.URL.Path
@@ -51,21 +51,21 @@ func PathIs(paths ...string) Condition {
 	}
 }
 
-// PathHasPrefix 路径前缀匹配
+// PathHasPrefix checks if the path has the specified prefix
 func PathHasPrefix(prefix string) Condition {
 	return func(c *gin.Context) bool {
 		return strings.HasPrefix(c.Request.URL.Path, prefix)
 	}
 }
 
-// PathHasSuffix 路径后缀匹配
+// PathHasSuffix checks if the path has the specified suffix
 func PathHasSuffix(suffix string) Condition {
 	return func(c *gin.Context) bool {
 		return strings.HasSuffix(c.Request.URL.Path, suffix)
 	}
 }
 
-// PathMatches 路径正则匹配
+// PathMatches checks if the path matches the specified regex pattern
 func PathMatches(pattern string) Condition {
 	re := regexp.MustCompile(pattern)
 	return func(c *gin.Context) bool {
@@ -73,9 +73,9 @@ func PathMatches(pattern string) Condition {
 	}
 }
 
-// HTTP 条件函数
+// HTTP conditions
 
-// MethodIs HTTP 方法匹配
+// MethodIs checks if the HTTP method matches any of the specified methods
 func MethodIs(methods ...string) Condition {
 	return func(c *gin.Context) bool {
 		currentMethod := c.Request.Method
@@ -83,7 +83,7 @@ func MethodIs(methods ...string) Condition {
 	}
 }
 
-// HeaderExists 检查请求头是否存在
+// HeaderExists checks if the request header exists
 func HeaderExists(key string) Condition {
 	return func(c *gin.Context) bool {
 		value := c.GetHeader(key)
@@ -91,14 +91,14 @@ func HeaderExists(key string) Condition {
 	}
 }
 
-// HeaderEquals 检查请求头值是否匹配
+// HeaderEquals checks if the request header value matches
 func HeaderEquals(key, value string) Condition {
 	return func(c *gin.Context) bool {
 		return c.GetHeader(key) == value
 	}
 }
 
-// ContentTypeIs 检查 Content-Type 是否匹配
+// ContentTypeIs checks if the Content-Type matches any of the specified types
 func ContentTypeIs(contentTypes ...string) Condition {
 	return func(c *gin.Context) bool {
 		currentContentType := c.GetHeader("Content-Type")
@@ -111,9 +111,9 @@ func ContentTypeIs(contentTypes ...string) Condition {
 	}
 }
 
-// 自定义条件函数
+// Custom conditions
 
-// Custom 自定义条件函数
+// Custom creates a custom condition
 func Custom(fn func(*gin.Context) bool) Condition {
 	return fn
 }

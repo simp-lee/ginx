@@ -12,32 +12,29 @@ import (
 	"github.com/simp-lee/logger"
 )
 
-// RecoveryHandler 定义 panic 恢复处理函数类型
 type RecoveryHandler func(*gin.Context, any)
 
-// defaultRecoveryHandler 默认的 panic 恢复处理
 func defaultRecoveryHandler(c *gin.Context, err any) {
-	// 简单统一返回 JSON 格式，适用于现代 Web 开发
 	c.AbortWithStatusJSON(500, gin.H{
 		"error":   "Internal Server Error",
 		"message": "An unexpected error occurred",
 	})
 }
 
-// Recovery 创建 panic 恢复中间件
+// Recovery creates a panic recovery middleware.
 func Recovery(options ...logger.Option) Middleware {
 	return RecoveryWith(nil, options...)
 }
 
-// RecoveryWith 创建带自定义处理器的 panic 恢复中间件
+// RecoveryWith creates a panic recovery middleware with a custom handler.
 func RecoveryWith(handler RecoveryHandler, loggerOptions ...logger.Option) Middleware {
-	// 创建 logger 实例
+	// Create logger instance
 	log, err := logger.New(loggerOptions...)
 	if err != nil {
 		panic("failed to create logger for recovery: " + err.Error())
 	}
 
-	// 使用默认处理器（如果没有提供）
+	// Use default handler if not provided
 	if handler == nil {
 		handler = defaultRecoveryHandler
 	}
@@ -46,23 +43,23 @@ func RecoveryWith(handler RecoveryHandler, loggerOptions ...logger.Option) Middl
 		return func(c *gin.Context) {
 			defer func() {
 				if err := recover(); err != nil {
-					// 检查是否为网络连接断开错误
+					// Check if the error is a broken pipe error
 					brokenPipe := isBrokenPipe(err)
 
-					// 记录 panic 日志
+					// Log panic information
 					if brokenPipe {
-						// 网络断开只记录基本信息，不记录堆栈
+						// Only log basic information, do not log stack trace
 						log.Warn("Connection broken",
 							"error", fmt.Sprintf("%v", err),
 							"path", c.Request.URL.Path,
 							"method", c.Request.Method,
 							"ip", c.ClientIP(),
 						)
-						// 网络断开时不能写入响应，直接中止
+						// Write response is not possible when the connection is broken, so just abort
 						c.Error(err.(error))
 						c.Abort()
 					} else {
-						// 真正的 panic 记录完整堆栈信息
+						// Log full stack trace for actual panics
 						stack := getStack()
 						log.Error("Panic recovered",
 							"error", fmt.Sprintf("%v", err),
@@ -72,31 +69,31 @@ func RecoveryWith(handler RecoveryHandler, loggerOptions ...logger.Option) Middl
 							"user_agent", c.Request.UserAgent(),
 							"stack", stack,
 						)
-						// 调用恢复处理器
+						// Call recovery handler
 						handler(c, err)
 					}
 				}
 			}()
 
-			// 执行下一个中间件
+			// Execute the next middleware
 			next(c)
 		}
 	}
 }
 
-// getStack 获取当前堆栈信息
+// getStack retrieves the current stack trace information.
 func getStack() string {
 	var buf [4096]byte
 	n := runtime.Stack(buf[:], false)
 	stack := string(buf[:n])
 
-	// 过滤掉 recovery 中间件相关的堆栈帧
+	// Filter out stack frames related to the recovery middleware
 	lines := strings.Split(stack, "\n")
 	var filteredLines []string
 	skipNext := false
 
 	for _, line := range lines {
-		// 跳过包含 recovery.go 的行及其下一行（文件位置）
+		// Skip lines containing recovery.go and the next line (file location)
 		if strings.Contains(line, "recovery.go") {
 			skipNext = true
 			continue
@@ -105,13 +102,13 @@ func getStack() string {
 			skipNext = false
 			continue
 		}
-		// 跳过 runtime panic 相关的行
+		// Skip lines related to runtime panic
 		if strings.Contains(line, "runtime.gopanic") ||
 			strings.Contains(line, "runtime/panic.go") {
 			continue
 		}
 
-		// 清理函数名（借鉴 Gin 的做法）
+		// Clean function name (borrowed from Gin)
 		line = cleanFunctionName(line)
 		filteredLines = append(filteredLines, line)
 	}
@@ -119,27 +116,27 @@ func getStack() string {
 	return strings.Join(filteredLines, "\n")
 }
 
-// cleanFunctionName 清理函数名，移除包路径并修复特殊字符
+// cleanFunctionName cleans up the function name by removing the package path and fixing special characters.
 func cleanFunctionName(line string) string {
-	// 只处理函数名行（不包含文件路径的行）
+	// Only process function name lines (those without file paths)
 	if strings.Contains(line, "/") && strings.Contains(line, ":") {
-		return line // 这是文件路径行，不处理
+		return line // This is a file path line, do not process
 	}
 
-	// 移除包路径（最后一个斜杠后的内容）
+	// Remove package path (everything after the last slash)
 	if lastSlash := strings.LastIndexByte(line, '/'); lastSlash >= 0 {
 		before := line[:strings.LastIndexByte(line[:lastSlash], ' ')+1]
 		after := line[lastSlash+1:]
 		line = before + after
 	}
 
-	// 修复中心点符号
+	// Fix center dot symbols (U+00B7) to normal dots
 	line = strings.ReplaceAll(line, "·", ".")
 
 	return line
 }
 
-// isBrokenPipe 检查错误是否为网络连接断开
+// isBrokenPipe checks if the error is a broken pipe error.
 func isBrokenPipe(err any) bool {
 	if ne, ok := err.(*net.OpError); ok {
 		var se *os.SyscallError

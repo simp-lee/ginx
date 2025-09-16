@@ -340,7 +340,8 @@ func (rl *RateLimiter) Close() error {
 // This is a convenience function for basic rate limiting needs.
 //
 // Example:
-//   r.Use(ginx.RateLimit(100, 200)) // 100 rps with burst of 200
+//
+//	r.Use(ginx.RateLimit(100, 200)) // 100 rps with burst of 200
 func RateLimit(rps, burst int) Middleware {
 	return NewRateLimiter(rps, burst).Middleware()
 }
@@ -349,7 +350,8 @@ func RateLimit(rps, burst int) Middleware {
 // Each IP address gets its own rate limit bucket.
 //
 // Example:
-//   r.Use(ginx.RateLimitByIP(10, 20)) // 10 rps per IP with burst of 20
+//
+//	r.Use(ginx.RateLimitByIP(10, 20)) // 10 rps per IP with burst of 20
 func RateLimitByIP(rps, burst int) Middleware {
 	return NewRateLimiter(rps, burst).
 		WithKeyFunc(KeyByIP()).
@@ -361,7 +363,8 @@ func RateLimitByIP(rps, burst int) Middleware {
 // Falls back to IP-based limiting if no user_id is found.
 //
 // Example:
-//   r.Use(ginx.RateLimitByUser(50, 100)) // 50 rps per user with burst of 100
+//
+//	r.Use(ginx.RateLimitByUser(50, 100)) // 50 rps per user with burst of 100
 func RateLimitByUser(rps, burst int) Middleware {
 	return NewRateLimiter(rps, burst).
 		WithKeyFunc(KeyByUserID()).
@@ -372,7 +375,8 @@ func RateLimitByUser(rps, burst int) Middleware {
 // This allows different rate limits for different endpoints per client.
 //
 // Example:
-//   r.Use(ginx.RateLimitByPath(5, 10)) // 5 rps per IP per path with burst of 10
+//
+//	r.Use(ginx.RateLimitByPath(5, 10)) // 5 rps per IP per path with burst of 10
 func RateLimitByPath(rps, burst int) Middleware {
 	return NewRateLimiter(rps, burst).
 		WithKeyFunc(KeyByPath()).
@@ -395,7 +399,8 @@ func RateLimitByPath(rps, burst int) Middleware {
 //   - timeout: Maximum time to wait for tokens
 //
 // Example:
-//   r.Use(ginx.RateLimitWithWait(10, 20, 5*time.Second))
+//
+//	r.Use(ginx.RateLimitWithWait(10, 20, 5*time.Second))
 func RateLimitWithWait(rps, burst int, timeout time.Duration) Middleware {
 	limiter := NewRateLimiter(rps, burst)
 
@@ -444,8 +449,9 @@ func RateLimitWithWait(rps, burst int, timeout time.Duration) Middleware {
 //   - keyFunc: Function to generate rate limiting keys (nil for default IP-based)
 //
 // Example:
-//   chain := ginx.NewChain().
-//     When(ginx.IsRateLimited(store, 10, 20, nil), ginx.ThrottleMiddleware())
+//
+//	chain := ginx.NewChain().
+//	  When(ginx.IsRateLimited(store, 10, 20, nil), ginx.ThrottleMiddleware())
 func IsRateLimited(store RateLimitStore, rps, burst int, keyFunc func(*gin.Context) string) Condition {
 	if keyFunc == nil {
 		keyFunc = defaultKeyFunc
@@ -493,12 +499,13 @@ type DynamicRateLimiter struct {
 // The getLimiter function receives a key and should return (rps, burst) for that key.
 //
 // Example:
-//   limiter := ginx.NewDynamicRateLimiter(func(userID string) (int, int) {
-//     if isPremiumUser(userID) {
-//       return 1000, 2000 // Premium users get higher limits
-//     }
-//     return 100, 200    // Regular users
-//   })
+//
+//	limiter := ginx.NewDynamicRateLimiter(func(userID string) (int, int) {
+//	  if isPremiumUser(userID) {
+//	    return 1000, 2000 // Premium users get higher limits
+//	  }
+//	  return 100, 200    // Regular users
+//	})
 func NewDynamicRateLimiter(getLimiter func(key string) (rps int, burst int)) *DynamicRateLimiter {
 	return &DynamicRateLimiter{
 		store:      NewMemoryLimiterStore(0),
@@ -548,17 +555,18 @@ func (dl *DynamicRateLimiter) getRateLimiter(key string) *rate.Limiter {
 // can have different rate limits based on the provided function.
 //
 // Example:
-//   middleware := ginx.RateLimitPerUser(func(userID string) (int, int) {
-//     plan := getUserPlan(userID)
-//     switch plan {
-//     case "premium":
-//       return 1000, 2000
-//     case "basic":
-//       return 100, 200
-//     default:
-//       return 10, 20
-//     }
-//   })
+//
+//	middleware := ginx.RateLimitPerUser(func(userID string) (int, int) {
+//	  plan := getUserPlan(userID)
+//	  switch plan {
+//	  case "premium":
+//	    return 1000, 2000
+//	  case "basic":
+//	    return 100, 200
+//	  default:
+//	    return 10, 20
+//	  }
+//	})
 func RateLimitPerUser(getLimiter func(userID string) (rps int, burst int)) Middleware {
 	return NewDynamicRateLimiter(getLimiter).Middleware()
 }
