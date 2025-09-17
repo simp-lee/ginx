@@ -1,6 +1,7 @@
 package ginx
 
 import (
+	"mime"
 	"regexp"
 	"slices"
 	"strings"
@@ -99,15 +100,21 @@ func HeaderEquals(key, value string) Condition {
 }
 
 // ContentTypeIs checks if the Content-Type matches any of the specified types
+// Uses precise MIME type parsing to avoid false positives
 func ContentTypeIs(contentTypes ...string) Condition {
 	return func(c *gin.Context) bool {
 		currentContentType := c.GetHeader("Content-Type")
-		for _, contentType := range contentTypes {
-			if strings.Contains(currentContentType, contentType) {
-				return true
-			}
+		if currentContentType == "" {
+			return false
 		}
-		return false
+
+		// Parse the Content-Type header to get the media type without parameters
+		mediaType, _, err := mime.ParseMediaType(currentContentType)
+		if err != nil {
+			return false
+		}
+
+		return slices.Contains(contentTypes, mediaType)
 	}
 }
 

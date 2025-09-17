@@ -284,6 +284,57 @@ func TestHTTPConditions(t *testing.T) {
 			t.Error("ContentTypeIs should return false for non-matching content type")
 		}
 	})
+
+	// Test cases for the fix - preventing false positives
+	t.Run("ContentTypeIs - prevent false positive json-patch", func(t *testing.T) {
+		headers := map[string]string{
+			"Content-Type": "application/json-patch+json",
+		}
+		c, _ := TestContext("PATCH", "/api/users", headers)
+
+		cond := ContentTypeIs("application/json")
+
+		if cond(c) {
+			t.Error("ContentTypeIs should NOT match json-patch+json when checking for json")
+		}
+	})
+
+	t.Run("ContentTypeIs - prevent false positive substring", func(t *testing.T) {
+		headers := map[string]string{
+			"Content-Type": "text/javascript",
+		}
+		c, _ := TestContext("GET", "/script.js", headers)
+
+		cond := ContentTypeIs("script")
+
+		if cond(c) {
+			t.Error("ContentTypeIs should NOT match substring 'script' in 'javascript'")
+		}
+	})
+
+	t.Run("ContentTypeIs - empty content type", func(t *testing.T) {
+		headers := map[string]string{}
+		c, _ := TestContext("GET", "/api/test", headers)
+
+		cond := ContentTypeIs("application/json")
+
+		if cond(c) {
+			t.Error("ContentTypeIs should return false for empty Content-Type")
+		}
+	})
+
+	t.Run("ContentTypeIs - malformed content type", func(t *testing.T) {
+		headers := map[string]string{
+			"Content-Type": "invalid/content/type/format",
+		}
+		c, _ := TestContext("POST", "/api/test", headers)
+
+		cond := ContentTypeIs("application/json")
+
+		if cond(c) {
+			t.Error("ContentTypeIs should return false for malformed Content-Type")
+		}
+	})
 }
 
 func TestCustomCondition(t *testing.T) {
