@@ -97,23 +97,30 @@ func TestCORSPreflightRequests(t *testing.T) {
 
 		middleware(next)(c)
 
-		// 预检请求不应该调用next
+		// Preflight request should not call next handler
 		if nextCalled {
 			t.Error("Preflight request should not call next handler")
 		}
 
-		// 检查响应状态码
+		// Check response status code
 		if w.Code != http.StatusNoContent {
 			t.Errorf("Expected status %d, got %d", http.StatusNoContent, w.Code)
 		}
 
-		// 检查CORS头部
+		// Check CORS headers
 		if w.Header().Get("Access-Control-Allow-Origin") != "https://example.com" {
 			t.Error("Should set correct Allow-Origin header")
 		}
 
 		if !strings.Contains(w.Header().Get("Access-Control-Allow-Methods"), "POST") {
 			t.Error("Should allow requested method")
+		}
+
+		// Check Vary header for preflight request to prevent proxy cache pollution
+		varyHeader := w.Header().Get("Vary")
+		expectedVary := "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+		if varyHeader != expectedVary {
+			t.Errorf("Expected Vary header '%s' for preflight request, got '%s'", expectedVary, varyHeader)
 		}
 	})
 
@@ -197,12 +204,12 @@ func TestCORSActualRequests(t *testing.T) {
 
 		middleware(next)(c)
 
-		// 实际请求应该调用next
+		// Actual request should call next handler
 		if !nextCalled {
 			t.Error("Actual request should call next handler")
 		}
 
-		// 检查CORS头部
+		// Check CORS headers
 		if w.Header().Get("Access-Control-Allow-Origin") != "https://example.com" {
 			t.Error("Should set correct Allow-Origin header")
 		}
@@ -229,12 +236,12 @@ func TestCORSActualRequests(t *testing.T) {
 
 		middleware(next)(c)
 
-		// 即使origin不匹配，实际请求也应该继续处理
+		// Should still process actual request even if origin doesn't match
 		if !nextCalled {
 			t.Error("Should still call next handler even with invalid origin")
 		}
 
-		// 但不应该设置CORS头部
+		// But should not set CORS headers
 		if w.Header().Get("Access-Control-Allow-Origin") != "" {
 			t.Error("Should not set Allow-Origin header for invalid origin")
 		}
@@ -257,7 +264,7 @@ func TestCORSActualRequests(t *testing.T) {
 			t.Error("Should set wildcard origin header")
 		}
 
-		// 通配符不应该设置Vary头
+		// Wildcard should not set Vary header
 		if w.Header().Get("Vary") != "" {
 			t.Error("Should not set Vary header for wildcard origin")
 		}
@@ -389,27 +396,27 @@ func TestCORSHeaderConfiguration(t *testing.T) {
 
 func TestCORSHelperFunctions(t *testing.T) {
 	t.Run("isOriginAllowed", func(t *testing.T) {
-		// 测试空列表
+		// Test empty list
 		if isOriginAllowed([]string{}, "https://example.com") {
 			t.Error("Empty allowed origins should return false")
 		}
 
-		// 测试通配符
+		// Test wildcard
 		if !isOriginAllowed([]string{"*"}, "https://example.com") {
 			t.Error("Wildcard should allow any origin")
 		}
 
-		// 测试精确匹配
+		// Test exact match
 		if !isOriginAllowed([]string{"https://example.com"}, "https://example.com") {
 			t.Error("Should allow exact origin match")
 		}
 
-		// 测试不匹配
+		// Test no match
 		if isOriginAllowed([]string{"https://allowed.com"}, "https://notallowed.com") {
 			t.Error("Should not allow non-matching origin")
 		}
 
-		// 测试多个源
+		// Test multiple origins
 		allowed := []string{"https://app1.com", "https://app2.com", "https://app3.com"}
 		if !isOriginAllowed(allowed, "https://app2.com") {
 			t.Error("Should find origin in multiple allowed origins")
@@ -419,32 +426,32 @@ func TestCORSHelperFunctions(t *testing.T) {
 	t.Run("areHeadersAllowed", func(t *testing.T) {
 		allowed := []string{"Content-Type", "Authorization", "X-Custom"}
 
-		// 测试单个允许的头部
+		// Test single allowed header
 		if !areHeadersAllowed(allowed, "Content-Type") {
 			t.Error("Should allow single allowed header")
 		}
 
-		// 测试多个允许的头部
+		// Test multiple allowed headers
 		if !areHeadersAllowed(allowed, "Content-Type, Authorization") {
 			t.Error("Should allow multiple allowed headers")
 		}
 
-		// 测试不允许的头部
+		// Test forbidden header
 		if areHeadersAllowed(allowed, "X-Forbidden") {
 			t.Error("Should not allow forbidden header")
 		}
 
-		// 测试混合（部分允许，部分不允许）
+		// Test mixed (partially allowed, partially forbidden)
 		if areHeadersAllowed(allowed, "Content-Type, X-Forbidden") {
 			t.Error("Should not allow when any header is forbidden")
 		}
 
-		// 测试大小写不敏感
+		// Test case insensitive
 		if !areHeadersAllowed(allowed, "content-type, AUTHORIZATION") {
 			t.Error("Header checking should be case insensitive")
 		}
 
-		// 测试带空格的头部
+		// Test headers with spaces
 		if !areHeadersAllowed(allowed, " Content-Type , Authorization ") {
 			t.Error("Should handle headers with spaces")
 		}
@@ -453,12 +460,12 @@ func TestCORSHelperFunctions(t *testing.T) {
 	t.Run("isHeaderAllowed", func(t *testing.T) {
 		allowed := []string{"Content-Type", "Authorization"}
 
-		// 测试精确匹配
+		// Test exact match
 		if !isHeaderAllowed(allowed, "Content-Type") {
 			t.Error("Should allow exact header match")
 		}
 
-		// 测试大小写不敏感
+		// Test case insensitive
 		if !isHeaderAllowed(allowed, "content-type") {
 			t.Error("Should be case insensitive")
 		}
@@ -467,7 +474,7 @@ func TestCORSHelperFunctions(t *testing.T) {
 			t.Error("Should be case insensitive for uppercase")
 		}
 
-		// 测试不匹配
+		// Test no match
 		if isHeaderAllowed(allowed, "X-Custom") {
 			t.Error("Should not allow non-matching header")
 		}
@@ -484,7 +491,7 @@ func TestCORSEdgeCases(t *testing.T) {
 			c.Status(http.StatusOK)
 		})(c)
 
-		// 没有Origin头的请求不应该设置CORS头部
+		// Request without Origin header should not set CORS headers
 		if w.Header().Get("Access-Control-Allow-Origin") != "" {
 			t.Error("Should not set CORS headers when Origin is missing")
 		}
@@ -499,7 +506,7 @@ func TestCORSEdgeCases(t *testing.T) {
 			c.Status(http.StatusOK)
 		})(c)
 
-		// 没有Origin的OPTIONS请求应该被拒绝
+		// OPTIONS request without Origin should be forbidden
 		if w.Code != http.StatusForbidden {
 			t.Error("OPTIONS request without Origin should be forbidden")
 		}

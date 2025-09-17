@@ -143,6 +143,9 @@ func handlePreflight(c *gin.Context, config *CORSConfig, origin string) {
 
 	// Set CORS response headers
 	setCORSHeaders(c, config, origin)
+
+	// Set Vary headers for preflight requests to avoid proxy cache pollution
+	setPreflightVaryHeaders(c)
 	c.AbortWithStatus(http.StatusNoContent)
 }
 
@@ -215,4 +218,12 @@ func isHeaderAllowed(allowedHeaders []string, header string) bool {
 	return slices.ContainsFunc(allowedHeaders, func(allowed string) bool {
 		return strings.ToLower(allowed) == header
 	})
+}
+
+// setPreflightVaryHeaders sets Vary headers for preflight requests to avoid proxy cache pollution
+func setPreflightVaryHeaders(c *gin.Context) {
+	// Set Vary headers to prevent incorrect caching of preflight responses
+	// This ensures that different combinations of Origin, Method, and Headers
+	// don't share the same cached response
+	c.Header("Vary", "Origin, Access-Control-Request-Method, Access-Control-Request-Headers")
 }
