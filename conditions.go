@@ -124,3 +124,10 @@ func ContentTypeIs(contentTypes ...string) Condition {
 func Custom(fn func(*gin.Context) bool) Condition {
 	return fn
 }
+
+// OnTimeout checks if the request has timed out
+func OnTimeout() Condition {
+	return func(c *gin.Context) bool {
+		return c.Writer.Header().Get("X-Timeout") == "true"
+	}
+}

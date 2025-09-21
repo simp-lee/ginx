@@ -4,15 +4,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 )
 
-// 测试工具和辅助函数
+// Test utilities and helper functions
 
-// TestContext 创建用于测试的 gin.Context
+var ginTestModeOnce sync.Once
+
+// TestContext creates a gin.Context for testing
 func TestContext(method, path string, headers map[string]string) (*gin.Context, *httptest.ResponseRecorder) {
-	gin.SetMode(gin.TestMode)
+	// Use sync.Once to ensure setting only once, avoiding concurrent race conditions
+	ginTestModeOnce.Do(func() {
+		gin.SetMode(gin.TestMode)
+	})
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -30,7 +36,7 @@ func TestContext(method, path string, headers map[string]string) (*gin.Context, 
 	return c, w
 }
 
-// TestMiddleware 创建用于测试的中间件，记录执行状态
+// TestMiddleware creates middleware for testing that records execution state
 func TestMiddleware(name string, executed *[]string) Middleware {
 	return func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
@@ -40,7 +46,7 @@ func TestMiddleware(name string, executed *[]string) Middleware {
 	}
 }
 
-// TestHandler 创建用于测试的处理器
+// TestHandler creates a handler for testing
 func TestHandler(executed *[]string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		*executed = append(*executed, "handler")
@@ -48,17 +54,17 @@ func TestHandler(executed *[]string) gin.HandlerFunc {
 	}
 }
 
-// AssertContains 检查切片是否包含指定元素
+// AssertContains checks if slice contains the specified element
 func AssertContains(slice []string, item string) bool {
 	return slices.Contains(slice, item)
 }
 
-// AssertEqual 检查两个值是否相等
+// AssertEqual checks if two values are equal
 func AssertEqual(expected, actual interface{}) bool {
 	return expected == actual
 }
 
-// AssertSliceEqual 检查两个字符串切片是否相等
+// AssertSliceEqual checks if two string slices are equal
 func AssertSliceEqual(expected, actual []string) bool {
 	if len(expected) != len(actual) {
 		return false

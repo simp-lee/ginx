@@ -2,6 +2,7 @@ package ginx
 
 import (
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -347,11 +348,12 @@ func TestCache_ConcurrentRequests(t *testing.T) {
 	r := gin.New()
 	r.Use(NewChain().Use(Cache(cache)).Build())
 
-	counter := 0
+	var counter int64
 	r.GET("/concurrent", func(c *gin.Context) {
-		counter++
+		// Use atomic operation to safely increment counter
+		count := atomic.AddInt64(&counter, 1)
 		time.Sleep(10 * time.Millisecond) // Simulate some processing time
-		c.JSON(200, gin.H{"count": counter})
+		c.JSON(200, gin.H{"count": count})
 	})
 
 	// Send multiple concurrent requests
