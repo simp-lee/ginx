@@ -49,7 +49,7 @@ func TestCache_BasicFunctionality(t *testing.T) {
 	assert.Equal(t, "custom-value", w2.Header().Get("Custom-Header"))
 
 	// Verify cache is actually working
-	assert.True(t, cache.Has("/test"))
+	assert.True(t, cache.Has("GET|/test"))
 }
 
 func TestCache_ConditionalCaching(t *testing.T) {
@@ -82,7 +82,7 @@ func TestCache_ConditionalCaching(t *testing.T) {
 	wGet := httptest.NewRecorder()
 	r.ServeHTTP(wGet, reqGet)
 	assert.Equal(t, 200, wGet.Code)
-	assert.True(t, cache.Has("/test"), "GET requests should be cached")
+	assert.True(t, cache.Has("GET|/test"), "GET requests should be cached")
 
 	methods := []string{"POST", "PUT", "DELETE"}
 	for _, method := range methods {
@@ -95,7 +95,7 @@ func TestCache_ConditionalCaching(t *testing.T) {
 	}
 
 	// Verify cache still exists (only GET request cache)
-	assert.True(t, cache.Has("/test"))
+	assert.True(t, cache.Has("GET|/test"))
 }
 
 func TestCache_QueryParameters(t *testing.T) {
@@ -132,8 +132,8 @@ func TestCache_QueryParameters(t *testing.T) {
 	assert.Contains(t, w2.Body.String(), "value2")
 
 	// Verify two different cache keys are created
-	assert.True(t, cache.Has("/test?param=value1"))
-	assert.True(t, cache.Has("/test?param=value2"))
+	assert.True(t, cache.Has("GET|/test?param=value1"))
+	assert.True(t, cache.Has("GET|/test?param=value2"))
 }
 
 func TestCache_StatusCodeFiltering(t *testing.T) {
@@ -176,9 +176,9 @@ func TestCache_StatusCodeFiltering(t *testing.T) {
 		assert.Equal(t, tc.statusCode, w.Code)
 
 		if tc.shouldCache {
-			assert.True(t, cache.Has(tc.path), "Status %d should be cached", tc.statusCode)
+			assert.True(t, cache.Has("GET|"+tc.path), "Status %d should be cached", tc.statusCode)
 		} else {
-			assert.False(t, cache.Has(tc.path), "Status %d should not be cached", tc.statusCode)
+			assert.False(t, cache.Has("GET|"+tc.path), "Status %d should not be cached", tc.statusCode)
 		}
 	}
 }
@@ -211,10 +211,10 @@ func TestCacheWithGroup_BasicFunctionality(t *testing.T) {
 
 	// Verify cache is in group
 	group := cache.Group("api-v1")
-	assert.True(t, group.Has("/test"))
+	assert.True(t, group.Has("GET|/test"))
 
 	// Main cache should not have this key (because it's in a group)
-	assert.False(t, cache.Has("/test"))
+	assert.False(t, cache.Has("GET|/test"))
 
 	// Second request - should hit group cache
 	req2 := httptest.NewRequest("GET", "/test", nil)
@@ -263,13 +263,13 @@ func TestCacheWithGroup_IsolationBetweenGroups(t *testing.T) {
 	group1 := cache.Group("group1")
 	group2 := cache.Group("group2")
 
-	assert.True(t, group1.Has("/test"))
-	assert.True(t, group2.Has("/test"))
+	assert.True(t, group1.Has("GET|/test"))
+	assert.True(t, group2.Has("GET|/test"))
 
 	// Clearing group1 cache should not affect group2
 	group1.Clear()
-	assert.False(t, group1.Has("/test"))
-	assert.True(t, group2.Has("/test"))
+	assert.False(t, group1.Has("GET|/test"))
+	assert.True(t, group2.Has("GET|/test"))
 }
 
 func TestCache_EmptyResponse(t *testing.T) {
@@ -294,7 +294,7 @@ func TestCache_EmptyResponse(t *testing.T) {
 
 	assert.Equal(t, 204, w.Code)
 	assert.Empty(t, w.Body.String())
-	assert.True(t, cache.Has("/empty"))
+	assert.True(t, cache.Has("GET|/empty"))
 
 	// Request again to verify cache
 	req2 := httptest.NewRequest("GET", "/empty", nil)
@@ -333,7 +333,7 @@ func TestCache_LargeResponse(t *testing.T) {
 
 	assert.Equal(t, 200, w.Code)
 	assert.Equal(t, len(largeData), len(w.Body.Bytes()))
-	assert.True(t, cache.Has("/large"))
+	assert.True(t, cache.Has("GET|/large"))
 }
 
 func TestCache_ConcurrentRequests(t *testing.T) {
@@ -381,7 +381,7 @@ func TestCache_ConcurrentRequests(t *testing.T) {
 	}
 
 	// Verify cache exists
-	assert.True(t, cache.Has("/concurrent"))
+	assert.True(t, cache.Has("GET|/concurrent"))
 }
 
 func TestGenerateCacheKey(t *testing.T) {
@@ -389,45 +389,109 @@ func TestGenerateCacheKey(t *testing.T) {
 
 	testCases := []struct {
 		name     string
+		method   string
 		path     string
 		query    string
 		expected string
 	}{
 		{
-			name:     "path only",
+			name:     "GET path only",
+			method:   "GET",
 			path:     "/api/users",
 			query:    "",
-			expected: "/api/users",
+			expected: "GET|/api/users",
 		},
 		{
-			name:     "path with query",
+			name:     "GET path with query",
+			method:   "GET",
 			path:     "/api/users",
 			query:    "page=1&limit=10",
-			expected: "/api/users?page=1&limit=10",
+			expected: "GET|/api/users?page=1&limit=10",
 		},
 		{
-			name:     "root path",
+			name:     "POST path only",
+			method:   "POST",
+			path:     "/api/users",
+			query:    "",
+			expected: "POST|/api/users",
+		},
+		{
+			name:     "POST path with query",
+			method:   "POST",
+			path:     "/api/users",
+			query:    "debug=true",
+			expected: "POST|/api/users?debug=true",
+		},
+		{
+			name:     "GET root path",
+			method:   "GET",
 			path:     "/",
 			query:    "",
-			expected: "/",
+			expected: "GET|/",
 		},
 		{
-			name:     "complex query",
+			name:     "PUT with complex query",
+			method:   "PUT",
 			path:     "/search",
 			query:    "q=golang&sort=date&order=desc",
-			expected: "/search?q=golang&sort=date&order=desc",
+			expected: "PUT|/search?q=golang&sort=date&order=desc",
+		},
+		{
+			name:     "DELETE path only",
+			method:   "DELETE",
+			path:     "/api/users/123",
+			query:    "",
+			expected: "DELETE|/api/users/123",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", tc.path+"?"+tc.query, nil)
+			var url string
+			if tc.query != "" {
+				url = tc.path + "?" + tc.query
+			} else {
+				url = tc.path
+			}
+
+			req := httptest.NewRequest(tc.method, url, nil)
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = req
 
 			key := generateCacheKey(c)
 			assert.Equal(t, tc.expected, key)
 		})
+	}
+}
+
+// TestGenerateCacheKey_MethodDifferentiation tests that different HTTP methods generate different cache keys
+func TestGenerateCacheKey_MethodDifferentiation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	path := "/api/users"
+	methods := []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+
+	keys := make(map[string]string)
+
+	for _, method := range methods {
+		req := httptest.NewRequest(method, path, nil)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = req
+
+		key := generateCacheKey(c)
+
+		// Ensure each method generates a unique key
+		for existingMethod, existingKey := range keys {
+			assert.NotEqual(t, existingKey, key,
+				"Method %s should generate different key than %s for same path",
+				method, existingMethod)
+		}
+
+		keys[method] = key
+
+		// Verify key format
+		expected := method + "|" + path
+		assert.Equal(t, expected, key)
 	}
 }
 
@@ -545,21 +609,21 @@ func TestCache_ComplexConditionalStrategies(t *testing.T) {
 	w1 := httptest.NewRecorder()
 	r.ServeHTTP(w1, req1)
 	assert.Equal(t, 200, w1.Code)
-	assert.True(t, cache.Has("/api/users"), "API GET should be cached")
+	assert.True(t, cache.Has("GET|/api/users"), "API GET should be cached")
 
 	// Test 2: Health checks should not be cached
 	req2 := httptest.NewRequest("GET", "/api/health", nil)
 	w2 := httptest.NewRecorder()
 	r.ServeHTTP(w2, req2)
 	assert.Equal(t, 200, w2.Code)
-	assert.False(t, cache.Has("/api/health"), "Health check should not be cached")
+	assert.False(t, cache.Has("GET|/api/health"), "Health check should not be cached")
 
 	// Test 3: Non-API paths should not be cached
 	req3 := httptest.NewRequest("GET", "/static/file", nil)
 	w3 := httptest.NewRecorder()
 	r.ServeHTTP(w3, req3)
 	assert.Equal(t, 200, w3.Code)
-	assert.False(t, cache.Has("/static/file"), "Non-API path should not be cached")
+	assert.False(t, cache.Has("GET|/static/file"), "Non-API path should not be cached")
 
 	// Test 4: POST requests should not be cached
 	req4 := httptest.NewRequest("POST", "/api/users", nil)
@@ -567,11 +631,11 @@ func TestCache_ComplexConditionalStrategies(t *testing.T) {
 	r.ServeHTTP(w4, req4)
 	assert.Equal(t, 201, w4.Code)
 	// POST request uses same path but doesn't override GET cache
-	assert.True(t, cache.Has("/api/users"), "GET cache should remain")
+	assert.True(t, cache.Has("GET|/api/users"), "GET cache should remain")
 
 	// Verify cache group usage
 	jsonGroup := cache.Group("json-api")
-	assert.True(t, jsonGroup.Has("/api/users"), "JSON API should be in group cache")
+	assert.True(t, jsonGroup.Has("GET|/api/users"), "JSON API should be in group cache")
 }
 
 func TestCache_PathBasedStrategies(t *testing.T) {
@@ -616,30 +680,30 @@ func TestCache_PathBasedStrategies(t *testing.T) {
 	req1 := httptest.NewRequest("GET", "/public/data", nil)
 	w1 := httptest.NewRecorder()
 	r.ServeHTTP(w1, req1)
-	assert.True(t, cache.Has("/public/data"))
+	assert.True(t, cache.Has("GET|/public/data"))
 
 	req2 := httptest.NewRequest("POST", "/public/upload", nil)
 	w2 := httptest.NewRecorder()
 	r.ServeHTTP(w2, req2)
-	assert.True(t, cache.Has("/public/upload"))
+	assert.True(t, cache.Has("POST|/public/upload"))
 
 	// Test that API path only caches GET
 	req3 := httptest.NewRequest("GET", "/api/users", nil)
 	w3 := httptest.NewRecorder()
 	r.ServeHTTP(w3, req3)
 	apiGroup := cache.Group("api")
-	assert.True(t, apiGroup.Has("/api/users"))
+	assert.True(t, apiGroup.Has("GET|/api/users"))
 
 	req4 := httptest.NewRequest("POST", "/api/users", nil)
 	w4 := httptest.NewRecorder()
 	r.ServeHTTP(w4, req4)
-	assert.True(t, apiGroup.Has("/api/users"), "GET cache should remain after POST request")
+	assert.True(t, apiGroup.Has("GET|/api/users"), "GET cache should remain after POST request")
 
 	// Test that admin path is not cached
 	req5 := httptest.NewRequest("GET", "/admin/stats", nil)
 	w5 := httptest.NewRecorder()
 	r.ServeHTTP(w5, req5)
-	assert.False(t, cache.Has("/admin/stats"))
+	assert.False(t, cache.Has("GET|/admin/stats"))
 }
 
 func TestCache_HeadersSetCorrectlyOnCacheHit(t *testing.T) {
@@ -752,9 +816,9 @@ func TestCache_RespectsHTTPSemantics(t *testing.T) {
 
 			// Check if response was cached
 			if tt.shouldBeCached {
-				assert.True(t, cache.Has("/test"), "Response should be cached: %s", tt.description)
+				assert.True(t, cache.Has("GET|/test"), "Response should be cached: %s", tt.description)
 			} else {
-				assert.False(t, cache.Has("/test"), "Response should not be cached: %s", tt.description)
+				assert.False(t, cache.Has("GET|/test"), "Response should not be cached: %s", tt.description)
 			}
 		})
 	}

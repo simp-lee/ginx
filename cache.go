@@ -150,10 +150,24 @@ func (w *responseWriter) cacheResponse() {
 }
 
 func generateCacheKey(c *gin.Context) string {
-	if c.Request.URL.RawQuery != "" {
-		return c.Request.URL.Path + "?" + c.Request.URL.RawQuery
+	method := c.Request.Method
+	path := c.Request.URL.Path
+	query := c.Request.URL.RawQuery
+
+	if query != "" {
+		capacity := len(method) + 1 + len(path) + 1 + len(query)
+		var builder strings.Builder
+		builder.Grow(capacity)
+
+		builder.WriteString(method)
+		builder.WriteByte('|')
+		builder.WriteString(path)
+		builder.WriteByte('?')
+		builder.WriteString(query)
+		return builder.String()
 	}
-	return c.Request.URL.Path
+
+	return method + "|" + path
 }
 
 // contains checks if a string contains any of the cache control directives
