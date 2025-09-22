@@ -202,9 +202,16 @@ func isOriginAllowed(allowedOrigins []string, origin string) bool {
 
 // areHeadersAllowed checks if the request headers are allowed
 func areHeadersAllowed(allowedHeaders []string, requestHeaders string) bool {
+	if requestHeaders == "" {
+		return true
+	}
+
 	headers := strings.SplitSeq(requestHeaders, ",")
 	for header := range headers {
 		header = strings.TrimSpace(header)
+		if header == "" {
+			continue
+		}
 		if !isHeaderAllowed(allowedHeaders, header) {
 			return false
 		}
