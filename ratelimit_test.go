@@ -1,6 +1,7 @@
 package ginx
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"testing"
@@ -100,10 +101,10 @@ func TestRateLimiterBasic(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("should allow requests within burst", func(t *testing.T) {
-		limiter := NewRateLimiter(10, 5) // 10 rps, burst 5
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		// Use a dedicated store for this test to avoid interference
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(10, 5, WithStore(store)) // 10 rps, burst 5
 
 		// First 5 requests should pass (burst capacity)
 		for i := 0; i < 5; i++ {
@@ -119,10 +120,10 @@ func TestRateLimiterBasic(t *testing.T) {
 	})
 
 	t.Run("should return 429 when burst exceeded", func(t *testing.T) {
-		limiter := NewRateLimiter(1, 2) // 1 rps, burst 2
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		// Use a dedicated store for this test to avoid interference
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 2, WithStore(store)) // 1 rps, burst 2
 
 		// Use up burst
 		for i := 0; i < 2; i++ {
@@ -140,18 +141,15 @@ func TestRateLimiterBasic(t *testing.T) {
 			c.JSON(200, gin.H{"success": true})
 		})
 		handler(c)
-
 		assert.Equal(t, http.StatusTooManyRequests, w.Code)
 	})
 
 	t.Run("should use custom key function", func(t *testing.T) {
-		limiter := NewRateLimiter(1, 1).
-			WithKeyFunc(func(c *gin.Context) string {
-				return "fixed-key"
-			})
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithKeyFunc(func(c *gin.Context) string {
+			return "fixed-key"
+		}))
 
 		// First request
 		c1, w1 := TestContext("GET", "/test", nil)
@@ -170,13 +168,11 @@ func TestRateLimiterBasic(t *testing.T) {
 	})
 
 	t.Run("should skip when skip function returns true", func(t *testing.T) {
-		limiter := NewRateLimiter(1, 1).
-			WithSkipFunc(func(c *gin.Context) bool {
-				return c.GetHeader("X-Skip") == "true"
-			})
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithSkipFunc(func(c *gin.Context) bool {
+			return c.GetHeader("X-Skip") == "true"
+		}))
 
 		// Use up limit
 		c1, w1 := TestContext("GET", "/test", nil)
@@ -200,10 +196,9 @@ func TestRateLimiterBasic(t *testing.T) {
 	})
 
 	t.Run("should disable headers when configured", func(t *testing.T) {
-		limiter := NewRateLimiter(10, 5).WithoutHeaders()
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(10, 5, WithStore(store), WithoutRateLimitHeaders())
 
 		c, w := TestContext("GET", "/test", nil)
 		handler := middleware(func(c *gin.Context) {
@@ -219,10 +214,9 @@ func TestRateLimiterBasic(t *testing.T) {
 	})
 
 	t.Run("should set correct rate limit headers", func(t *testing.T) {
-		limiter := NewRateLimiter(10, 5) // 10 rps, burst 5
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(10, 5, WithStore(store)) // 10 rps, burst 5
 
 		c, w := TestContext("GET", "/test", nil)
 		handler := middleware(func(c *gin.Context) {
@@ -254,7 +248,9 @@ func TestConvenienceFunctions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("RateLimit should work", func(t *testing.T) {
-		middleware := RateLimit(10, 5)
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(10, 5, WithStore(store))
 
 		c, w := TestContext("GET", "/test", nil)
 		handler := middleware(func(c *gin.Context) {
@@ -265,8 +261,10 @@ func TestConvenienceFunctions(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
 
-	t.Run("RateLimitByIP should work", func(t *testing.T) {
-		middleware := RateLimitByIP(10, 5)
+	t.Run("RateLimit with WithIP should work", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(10, 5, WithStore(store), WithIP())
 
 		c, w := TestContext("GET", "/test", nil)
 		handler := middleware(func(c *gin.Context) {
@@ -277,8 +275,10 @@ func TestConvenienceFunctions(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
 
-	t.Run("RateLimitByUser should work", func(t *testing.T) {
-		middleware := RateLimitByUser(10, 5)
+	t.Run("RateLimit with WithUser should work", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(10, 5, WithStore(store), WithUser())
 
 		c, w := TestContext("GET", "/test", nil)
 		SetUserID(c, "user123")
@@ -303,7 +303,9 @@ func TestDynamicRateLimiter(t *testing.T) {
 	}
 
 	t.Run("should apply different limits for different users", func(t *testing.T) {
-		middleware := RateLimitPerUser(getLimiter)
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(0, 0, WithStore(store), WithUser(), WithDynamicLimits(getLimiter))
 
 		// Premium user should have higher limits
 		c1, w1 := TestContext("GET", "/test", nil)
@@ -323,36 +325,45 @@ func TestDynamicRateLimiter(t *testing.T) {
 		handler(c2)
 		assert.Equal(t, http.StatusOK, w2.Code)
 	})
-}
 
-func TestIsRateLimited(t *testing.T) {
-	gin.SetMode(gin.TestMode)
+	t.Run("should handle zero burst correctly with dynamic limits", func(t *testing.T) {
+		// Test case for the bug: dynamic limits with zero burst but non-zero static config
+		getDynamicLimits := func(key string) (rps int, burst int) {
+			if key == "user:zero-burst" {
+				return 10, 0 // Dynamic: 10 rps, 0 burst (should be rejected immediately)
+			}
+			if key == "user:unlimited" {
+				return 0, 0 // Dynamic: unlimited (should be allowed)
+			}
+			return 10, 20 // Default limits
+		}
 
-	t.Run("should return false when not limited", func(t *testing.T) {
 		store := NewMemoryLimiterStore(time.Minute)
 		defer store.Close()
+		// Use non-zero static config (100, 200) but dynamic limits may be (10, 0) or (0, 0)
+		middleware := RateLimit(100, 200, WithStore(store), WithUser(), WithDynamicLimits(getDynamicLimits))
 
-		condition := IsRateLimited(store, 10, 5, nil)
-		c, _ := TestContext("GET", "/test", nil)
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
 
-		result := condition(c)
-		assert.False(t, result)
-	})
+		// Test 1: User with dynamic zero burst should be rejected immediately
+		c1, w1 := TestContext("GET", "/test", nil)
+		SetUserID(c1, "zero-burst")
+		handler(c1)
+		assert.Equal(t, http.StatusTooManyRequests, w1.Code, "Zero burst user should be rate limited immediately")
 
-	t.Run("should return true when limited", func(t *testing.T) {
-		store := NewMemoryLimiterStore(time.Minute)
-		defer store.Close()
+		// Test 2: User with dynamic unlimited (0, 0) should be allowed despite static config
+		c2, w2 := TestContext("GET", "/test", nil)
+		SetUserID(c2, "unlimited")
+		handler(c2)
+		assert.Equal(t, http.StatusOK, w2.Code, "Unlimited user should be allowed")
 
-		// Pre-populate with exhausted limiter
-		limiter := rate.NewLimiter(1, 1)
-		limiter.Allow() // Use up the burst
-		store.Set("192.0.2.1", limiter)
-
-		condition := IsRateLimited(store, 1, 1, nil)
-		c, _ := TestContext("GET", "/test", nil)
-
-		result := condition(c)
-		assert.True(t, result)
+		// Test 3: Regular user with normal limits should work
+		c3, w3 := TestContext("GET", "/test", nil)
+		SetUserID(c3, "regular")
+		handler(c3)
+		assert.Equal(t, http.StatusOK, w3.Code, "Regular user should be allowed")
 	})
 }
 
@@ -360,10 +371,9 @@ func TestRateLimiterEdgeCases(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("should handle zero rps gracefully", func(t *testing.T) {
-		limiter := NewRateLimiter(0, 1)
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(0, 1, WithStore(store))
 		c, w := TestContext("GET", "/test", nil)
 
 		handler := middleware(func(c *gin.Context) {
@@ -376,10 +386,7 @@ func TestRateLimiterEdgeCases(t *testing.T) {
 	})
 
 	t.Run("should handle zero burst gracefully", func(t *testing.T) {
-		limiter := NewRateLimiter(10, 0)
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		middleware := RateLimit(10, 0)
 		c, w := TestContext("GET", "/test", nil)
 
 		handler := middleware(func(c *gin.Context) {
@@ -392,10 +399,9 @@ func TestRateLimiterEdgeCases(t *testing.T) {
 	})
 
 	t.Run("should handle very large values", func(t *testing.T) {
-		limiter := NewRateLimiter(1000000, 2000000)
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1000000, 2000000, WithStore(store))
 		c, w := TestContext("GET", "/test", nil)
 
 		handler := middleware(func(c *gin.Context) {
@@ -407,10 +413,9 @@ func TestRateLimiterEdgeCases(t *testing.T) {
 	})
 
 	t.Run("should handle nil skip function", func(t *testing.T) {
-		limiter := NewRateLimiter(10, 5).WithSkipFunc(nil)
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(10, 5, WithStore(store), WithSkipFunc(nil))
 		c, w := TestContext("GET", "/test", nil)
 
 		handler := middleware(func(c *gin.Context) {
@@ -422,10 +427,9 @@ func TestRateLimiterEdgeCases(t *testing.T) {
 	})
 
 	t.Run("should handle nil key function", func(t *testing.T) {
-		limiter := NewRateLimiter(10, 5).WithKeyFunc(nil)
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(10, 5, WithStore(store), WithKeyFunc(nil))
 		c, w := TestContext("GET", "/test", nil)
 
 		handler := middleware(func(c *gin.Context) {
@@ -441,10 +445,9 @@ func TestRateLimiterConcurrency(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("should be thread safe", func(t *testing.T) {
-		limiter := NewRateLimiter(100, 200)
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(100, 200, WithStore(store))
 		const numGoroutines = 10
 		const requestsPerGoroutine = 10
 
@@ -487,10 +490,9 @@ func TestRateLimiterHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("should set correct headers when remaining is 0", func(t *testing.T) {
-		limiter := NewRateLimiter(1, 1) // Very restrictive
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store)) // Very restrictive
 
 		// First request - should succeed
 		c1, w1 := TestContext("GET", "/test", nil)
@@ -511,10 +513,9 @@ func TestRateLimiterHeaders(t *testing.T) {
 	})
 
 	t.Run("should have correct header values", func(t *testing.T) {
-		limiter := NewRateLimiter(10, 5)
-		defer limiter.Close()
-
-		middleware := limiter.Middleware()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(10, 5, WithStore(store))
 		c, w := TestContext("GET", "/test", nil)
 
 		handler := middleware(func(c *gin.Context) {
@@ -544,7 +545,9 @@ func TestRateLimitWithWait(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("should timeout when wait time exceeds limit", func(t *testing.T) {
-		middleware := RateLimitWithWait(1, 1, 10*time.Millisecond)
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithWait(10*time.Millisecond))
 
 		// Use up the bucket first
 		c1, w1 := TestContext("GET", "/test", nil)
@@ -561,7 +564,9 @@ func TestRateLimitWithWait(t *testing.T) {
 	})
 
 	t.Run("should work with sufficient timeout", func(t *testing.T) {
-		middleware := RateLimitWithWait(10, 1, 5*time.Second)
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(10, 1, WithStore(store), WithWait(5*time.Second))
 
 		c, w := TestContext("GET", "/test", nil)
 		handler := middleware(func(c *gin.Context) {
@@ -570,47 +575,6 @@ func TestRateLimitWithWait(t *testing.T) {
 		handler(c)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-	})
-}
-
-func TestKeyFunctions(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	t.Run("KeyByUserID should fallback to IP when no user_id", func(t *testing.T) {
-		keyFunc := KeyByUserID()
-		c, _ := TestContext("GET", "/test", nil)
-		c.Request.RemoteAddr = "192.168.1.1:8080"
-
-		key := keyFunc(c)
-		assert.Equal(t, "192.168.1.1", key) // Should fallback to IP
-	})
-
-	t.Run("KeyByUserID should use user_id when available", func(t *testing.T) {
-		keyFunc := KeyByUserID()
-		c, _ := TestContext("GET", "/test", nil)
-		SetUserID(c, "user123")
-
-		key := keyFunc(c)
-		assert.Equal(t, "user:user123", key)
-	})
-
-	t.Run("KeyByUserID should fallback when user_id is not string", func(t *testing.T) {
-		keyFunc := KeyByUserID()
-		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", 123) // Not a string
-		c.Request.RemoteAddr = "192.168.1.1:8080"
-
-		key := keyFunc(c)
-		assert.Equal(t, "192.168.1.1", key)
-	})
-
-	t.Run("KeyByPath should include path in key", func(t *testing.T) {
-		keyFunc := KeyByPath()
-		c, _ := TestContext("GET", "/api/users", nil)
-		c.Request.RemoteAddr = "192.168.1.1:8080"
-
-		key := keyFunc(c)
-		assert.Equal(t, "192.168.1.1:/api/users", key)
 	})
 }
 
@@ -663,10 +627,7 @@ func TestMemoryLimiterStoreEdgeCases(t *testing.T) {
 // Benchmark tests
 func BenchmarkRateLimiter(b *testing.B) {
 	gin.SetMode(gin.TestMode)
-	limiter := NewRateLimiter(1000, 2000)
-	defer limiter.Close()
-
-	middleware := limiter.Middleware()
+	middleware := RateLimit(1000, 2000)
 	handler := middleware(func(c *gin.Context) {
 		c.Status(200)
 	})
@@ -676,6 +637,552 @@ func BenchmarkRateLimiter(b *testing.B) {
 		c, _ := TestContext("GET", "/test", nil)
 		handler(c)
 	}
+}
+
+// TestDynamicRateLimitUpdates tests dynamic limiter updates and header consistency
+func TestDynamicRateLimitUpdates(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// Track which limits are returned for specific keys
+	limitsMap := map[string][2]int{
+		"user:test": {10, 20}, // Initial limits
+	}
+
+	getLimits := func(key string) (rps int, burst int) {
+		limits := limitsMap[key]
+		return limits[0], limits[1]
+	}
+
+	t.Run("should update existing limiter when dynamic limits change", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithUser(), WithDynamicLimits(getLimits)) // Use non-zero base to avoid unlimited mode
+
+		// First request creates limiter with initial limits
+		c1, w1 := TestContext("GET", "/test", nil)
+		SetUserID(c1, "test")
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+		assert.Equal(t, "10", w1.Header().Get("X-RateLimit-Limit"))
+
+		// Change the dynamic limits
+		limitsMap["user:test"] = [2]int{50, 100}
+
+		// Second request should update the limiter and reflect new limits in headers
+		c2, w2 := TestContext("GET", "/test", nil)
+		SetUserID(c2, "test")
+
+		handler(c2)
+		assert.Equal(t, http.StatusOK, w2.Code)
+		assert.Equal(t, "50", w2.Header().Get("X-RateLimit-Limit")) // Updated limit
+	})
+
+	t.Run("should maintain header consistency with actual limiter behavior", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		// Set very low limits to easily trigger rate limiting
+		limitsMap["user:header"] = [2]int{1, 1}
+
+		middleware := RateLimit(1, 1, WithStore(store), WithUser(), WithDynamicLimits(getLimits)) // Use non-zero base
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// First request should succeed
+		c1, w1 := TestContext("GET", "/test", nil)
+		SetUserID(c1, "header")
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+		assert.Equal(t, "1", w1.Header().Get("X-RateLimit-Limit"))
+
+		// Second request should be rate limited
+		c2, w2 := TestContext("GET", "/test", nil)
+		SetUserID(c2, "header")
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+		assert.Equal(t, "1", w2.Header().Get("X-RateLimit-Limit"))
+		assert.Equal(t, "0", w2.Header().Get("X-RateLimit-Remaining"))
+	})
+}
+
+// TestWaitMiddlewareRetryAfterHeaders tests that wait middleware sets Retry-After headers on timeout
+func TestWaitMiddlewareRetryAfterHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("should set Retry-After header on wait timeout", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		// Very restrictive limits to force timeout
+		middleware := RateLimit(1, 1, WithStore(store), WithWait(50*time.Millisecond))
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// First request consumes the token
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Second request should timeout and have Retry-After header
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		retryAfter := w2.Header().Get("Retry-After")
+		assert.NotEmpty(t, retryAfter)
+
+		// Should be at least 1 second (our minimum)
+		retrySeconds, err := strconv.Atoi(retryAfter)
+		assert.NoError(t, err)
+		assert.GreaterOrEqual(t, retrySeconds, 1)
+	})
+
+	t.Run("should set rate limit headers even on timeout", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		middleware := RateLimit(5, 2, WithStore(store), WithWait(10*time.Millisecond))
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume tokens
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusOK, w2.Code)
+
+		// This should timeout
+		c3, w3 := TestContext("GET", "/test", nil)
+		handler(c3)
+		assert.Equal(t, http.StatusTooManyRequests, w3.Code)
+		assert.Equal(t, "5", w3.Header().Get("X-RateLimit-Limit"))
+		assert.Equal(t, "0", w3.Header().Get("X-RateLimit-Remaining"))
+		assert.NotEmpty(t, w3.Header().Get("Retry-After"))
+	})
+}
+
+// TestHeaderDataSourceConsistency tests that headers reflect actual limiter state
+func TestHeaderDataSourceConsistency(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("should use limiter values not configuration values for headers", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		// Static configuration values
+		middleware := RateLimit(100, 200, WithStore(store))
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		c, w := TestContext("GET", "/test", nil)
+		handler(c)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "100", w.Header().Get("X-RateLimit-Limit"))
+		assert.Equal(t, "199", w.Header().Get("X-RateLimit-Remaining")) // burst - 1 token used
+	})
+
+	t.Run("should skip headers for unlimited rate", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		// Both rps and burst are 0 - should be unlimited
+		middleware := RateLimit(0, 0, WithStore(store))
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		c, w := TestContext("GET", "/test", nil)
+		handler(c)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		// Headers should be empty for unlimited rate
+		assert.Empty(t, w.Header().Get("X-RateLimit-Limit"))
+		assert.Empty(t, w.Header().Get("X-RateLimit-Remaining"))
+		assert.Empty(t, w.Header().Get("X-RateLimit-Reset"))
+	})
+}
+
+// TestInvalidConfigurationCombinations tests various invalid rps/burst combinations
+func TestInvalidConfigurationCombinations(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("should handle zero rps with positive burst", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		middleware := RateLimit(0, 5, WithStore(store)) // 0 rps, positive burst
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		c, w := TestContext("GET", "/test", nil)
+		handler(c)
+
+		// Should work (rps gets set to minimum 1)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "1", w.Header().Get("X-RateLimit-Limit")) // Minimum valid rps
+	})
+
+	t.Run("should handle negative values", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		middleware := RateLimit(-10, -5, WithStore(store)) // Negative values
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		c, w := TestContext("GET", "/test", nil)
+		handler(c)
+
+		// Should be treated as unlimited (both negative)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, w.Header().Get("X-RateLimit-Limit")) // No headers for unlimited
+	})
+}
+
+// TestRetryAfterConsistency tests that Retry-After is calculated consistently
+func TestRetryAfterConsistency(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("should have consistent Retry-After in header and JSON", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		middleware := RateLimit(1, 1, WithStore(store))
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume the token
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Get rate limited
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		retryAfterHeader := w2.Header().Get("Retry-After")
+		assert.NotEmpty(t, retryAfterHeader)
+
+		// Parse JSON response to check retry_after field
+		var response map[string]interface{}
+		err := json.Unmarshal(w2.Body.Bytes(), &response)
+		assert.NoError(t, err)
+
+		retryAfterJSON, exists := response["retry_after"]
+		assert.True(t, exists)
+
+		// Convert both to strings for comparison (JSON numbers might be float64)
+		headerSeconds, _ := strconv.Atoi(retryAfterHeader)
+		jsonSeconds := int(retryAfterJSON.(float64))
+
+		// Should be the same value
+		assert.Equal(t, headerSeconds, jsonSeconds)
+		assert.GreaterOrEqual(t, headerSeconds, 1) // At least 1 second
+	})
+}
+
+// TestWithoutHeadersRetryAfterBehavior tests WithoutHeaders and WithoutRetryAfter behavior (deprecated naming)
+func TestWithoutHeadersRetryAfterBehavior(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("WithoutHeaders should disable X-RateLimit-* but keep Retry-After headers", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithoutRateLimitHeaders()) // Very restrictive to trigger rate limiting
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// First request - consume the token
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Second request - should be rate limited
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		// X-RateLimit-* headers should be empty
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Limit"))
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Remaining"))
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Reset"))
+		// But Retry-After should still be present (RFC recommendation)
+		assert.NotEmpty(t, w2.Header().Get("Retry-After"), "Retry-After should be kept even with WithoutHeaders")
+	})
+
+	t.Run("WithoutHeaders should keep Retry-After in Wait mode too", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithWait(10*time.Millisecond), WithoutRateLimitHeaders())
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume the token first
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// This should timeout and be rate limited
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		// X-RateLimit-* headers should be empty
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Limit"))
+		// But Retry-After should still be present
+		assert.NotEmpty(t, w2.Header().Get("Retry-After"), "Wait mode Retry-After should be kept even with WithoutHeaders")
+	})
+
+	t.Run("WithoutRetryAfter should disable only Retry-After headers", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithoutRetryAfterHeader()) // Keep X-RateLimit-* but disable Retry-After
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// First request - consume the token
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Second request - should be rate limited
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		// X-RateLimit-* headers should be present
+		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Limit"))
+		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Remaining"))
+		// But Retry-After should be disabled
+		assert.Empty(t, w2.Header().Get("Retry-After"), "Retry-After should be disabled with WithoutRetryAfter")
+	})
+
+	t.Run("WithoutHeaders and WithoutRetryAfter should disable all headers", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithoutRateLimitHeaders(), WithoutRetryAfterHeader())
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// First request - consume the token
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Second request - should be rate limited
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		// All headers should be empty
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Limit"))
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Remaining"))
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Reset"))
+		assert.Empty(t, w2.Header().Get("Retry-After"))
+	})
+}
+
+// TestRateLimitHeaderConfiguration tests the new naming for header configuration
+func TestRateLimitHeaderConfiguration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("WithoutRateLimitHeaders should disable only X-RateLimit-* headers", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithoutRateLimitHeaders())
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume the token
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Get rate limited
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		// X-RateLimit-* headers should be disabled
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Limit"))
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Remaining"))
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Reset"))
+		// But Retry-After should still be present
+		assert.NotEmpty(t, w2.Header().Get("Retry-After"))
+	})
+
+	t.Run("WithoutRetryAfterHeader should disable only Retry-After header", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithoutRetryAfterHeader())
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume the token
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Get rate limited
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		// X-RateLimit-* headers should be present
+		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Limit"))
+		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Remaining"))
+		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Reset"))
+		// But Retry-After should be disabled
+		assert.Empty(t, w2.Header().Get("Retry-After"))
+	})
+
+	t.Run("Combine both options to disable all headers", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store),
+			WithoutRateLimitHeaders(),
+			WithoutRetryAfterHeader(),
+		)
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume the token
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Get rate limited
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		// All headers should be disabled
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Limit"))
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Remaining"))
+		assert.Empty(t, w2.Header().Get("X-RateLimit-Reset"))
+		assert.Empty(t, w2.Header().Get("Retry-After"))
+	})
+
+	t.Run("Default behavior includes all headers", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store)) // No options = all headers enabled
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume the token
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Get rate limited
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		// All headers should be present by default
+		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Limit"))
+		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Remaining"))
+		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Reset"))
+		assert.NotEmpty(t, w2.Header().Get("Retry-After"))
+	})
+}
+
+// TestWaitVsStandardRetryAfterConsistency tests consistency between wait and standard mode Retry-After calculation
+func TestWaitVsStandardRetryAfterConsistency(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("wait mode should use accurate delay calculation not timeout value", func(t *testing.T) {
+		store1 := NewMemoryLimiterStore(time.Minute)
+		defer store1.Close()
+		store2 := NewMemoryLimiterStore(time.Minute)
+		defer store2.Close()
+
+		// Both use same rate limits but wait timeout is very short to force timeout
+		standardMiddleware := RateLimit(2, 1, WithStore(store1))                            // 2 rps, burst 1
+		waitMiddleware := RateLimit(2, 1, WithStore(store2), WithWait(10*time.Millisecond)) // Same limits, very short timeout
+
+		standardHandler := standardMiddleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+		waitHandler := waitMiddleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume tokens in both
+		c1, w1 := TestContext("GET", "/test", nil)
+		standardHandler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		c2, w2 := TestContext("GET", "/test", nil)
+		waitHandler(c2)
+		assert.Equal(t, http.StatusOK, w2.Code)
+
+		// Get rate limited responses
+		c3, w3 := TestContext("GET", "/test", nil)
+		standardHandler(c3)
+		assert.Equal(t, http.StatusTooManyRequests, w3.Code)
+
+		c4, w4 := TestContext("GET", "/test", nil)
+		waitHandler(c4)
+		assert.Equal(t, http.StatusTooManyRequests, w4.Code)
+
+		standardRetryAfter := w3.Header().Get("Retry-After")
+		waitRetryAfter := w4.Header().Get("Retry-After")
+
+		assert.NotEmpty(t, standardRetryAfter)
+		assert.NotEmpty(t, waitRetryAfter)
+
+		// Both should use accurate delay calculation, not timeout value
+		standardSeconds, _ := strconv.Atoi(standardRetryAfter)
+		waitSeconds, _ := strconv.Atoi(waitRetryAfter)
+
+		// After fix, both should be similar (based on actual token availability, not timeout)
+		// Both should use actual delay calculation (~0.5s for 2rps, rounded up to 1)
+		assert.Equal(t, 1, standardSeconds, "Standard mode uses actual delay calculation")
+		assert.Equal(t, 1, waitSeconds, "Wait mode should also use actual delay calculation, not timeout value")
+	})
 }
 
 func BenchmarkMemoryStore(b *testing.B) {

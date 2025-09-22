@@ -86,7 +86,7 @@ func setupBasicRateLimit(r *gin.Engine) {
 	}))
 
 	// 2. Per-IP rate limit - each IP gets its own rate limit bucket
-	basic.GET("/per-ip", ginx.RateLimitByIP(5, 10)(func(c *gin.Context) {
+	basic.GET("/per-ip", ginx.RateLimit(5, 10, ginx.WithIP())(func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message":   "Per-IP rate limit: 5 rps, burst 10",
 			"client_ip": c.ClientIP(),
@@ -97,7 +97,7 @@ func setupBasicRateLimit(r *gin.Engine) {
 	// 3. Per-user rate limit - requires user authentication
 	basic.GET("/per-user",
 		extractUserID(), // Middleware to extract user_id from query
-		ginx.RateLimitByUser(3, 6)(func(c *gin.Context) {
+		ginx.RateLimit(3, 6, ginx.WithUser())(func(c *gin.Context) {
 			userID, _ := c.Get("user_id")
 			c.JSON(http.StatusOK, gin.H{
 				"message": "Per-user rate limit: 3 rps, burst 6",
@@ -107,7 +107,7 @@ func setupBasicRateLimit(r *gin.Engine) {
 		}))
 
 	// 4. Per-path rate limit - different limits for different endpoints
-	basic.GET("/per-path", ginx.RateLimitByPath(2, 4)(func(c *gin.Context) {
+	basic.GET("/per-path", ginx.RateLimit(2, 4, ginx.WithPath())(func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "Per-path rate limit: 2 rps, burst 4",
 			"path":    c.Request.URL.Path,
@@ -121,13 +121,11 @@ func setupAdvancedRateLimit(r *gin.Engine) {
 	advanced := r.Group("/advanced")
 
 	// 1. Custom key function - group requests by custom logic
-	customKeyLimiter := ginx.NewRateLimiter(8, 15).
-		WithKeyFunc(func(c *gin.Context) string {
+	advanced.GET("/custom-key", ginx.RateLimit(8, 15,
+		ginx.WithKeyFunc(func(c *gin.Context) string {
 			// Group by user agent + IP for more granular control
 			return fmt.Sprintf("%s:%s", c.ClientIP(), c.GetHeader("User-Agent"))
-		})
-
-	advanced.GET("/custom-key", customKeyLimiter.Middleware()(func(c *gin.Context) {
+		}))(func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message":    "Custom key function: 8 rps, burst 15",
 			"key_basis":  "IP + User-Agent",
@@ -137,13 +135,11 @@ func setupAdvancedRateLimit(r *gin.Engine) {
 	}))
 
 	// 2. Skip function - exempt certain requests
-	skipAdminLimiter := ginx.NewRateLimiter(4, 8).
-		WithSkipFunc(func(c *gin.Context) bool {
+	advanced.GET("/skip-admin", ginx.RateLimit(4, 8,
+		ginx.WithSkipFunc(func(c *gin.Context) bool {
 			// Skip rate limiting for admin users
 			return c.Query("admin") == "true"
-		})
-
-	advanced.GET("/skip-admin", skipAdminLimiter.Middleware()(func(c *gin.Context) {
+		}))(func(c *gin.Context) {
 		isAdmin := c.Query("admin") == "true"
 		c.JSON(http.StatusOK, gin.H{
 			"message":  "Skip function: 4 rps, burst 8",
@@ -153,9 +149,7 @@ func setupAdvancedRateLimit(r *gin.Engine) {
 	}))
 
 	// 3. Disable headers - no X-RateLimit-* headers in response
-	noHeadersLimiter := ginx.NewRateLimiter(6, 12).WithoutHeaders()
-
-	advanced.GET("/no-headers", noHeadersLimiter.Middleware()(func(c *gin.Context) {
+	advanced.GET("/no-headers", ginx.RateLimit(6, 12, ginx.WithoutRateLimitHeaders())(func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "No headers: 6 rps, burst 12",
 			"info":    "Rate limit info is not included in response headers",
@@ -163,7 +157,7 @@ func setupAdvancedRateLimit(r *gin.Engine) {
 	}))
 
 	// 4. Rate limiting with waiting - smooths out traffic spikes
-	advanced.GET("/with-wait", ginx.RateLimitWithWait(3, 5, 2*time.Second)(func(c *gin.Context) {
+	advanced.GET("/with-wait", ginx.RateLimit(3, 5, ginx.WithWait(2*time.Second))(func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"message": "With wait: 3 rps, burst 5, max wait 2s",
 			"info":    "Requests wait up to 2 seconds for available tokens",
@@ -178,12 +172,18 @@ func setupDynamicRateLimit(r *gin.Engine) {
 	// 1. Premium user rate limiting
 	dynamic.GET("/premium",
 		extractUserID(),
-		ginx.RateLimitPerUser(func(userID string) (rps int, burst int) {
-			if isPremiumUser(userID) {
-				return 50, 100 // Premium users get higher limits
-			}
-			return 10, 20 // Regular users
-		})(func(c *gin.Context) {
+		ginx.RateLimit(10, 20, // Default limits for regular users
+			ginx.WithUser(),
+			ginx.WithDynamicLimits(func(key string) (rps int, burst int) {
+				// Extract user ID from the key (format is "user:userID")
+				if after, ok := strings.CutPrefix(key, "user:"); ok {
+					userID := after
+					if isPremiumUser(userID) {
+						return 50, 100 // Premium users get higher limits
+					}
+				}
+				return 10, 20 // Regular users
+			}))(func(c *gin.Context) {
 			userID, _ := c.Get("user_id")
 			isPremium := isPremiumUser(userID.(string))
 
@@ -202,23 +202,29 @@ func setupDynamicRateLimit(r *gin.Engine) {
 		}))
 
 	// 2. Tiered rate limiting based on user plan
-	// Since DynamicRateLimiter uses user ID by default, we'll simulate different user types
-	tieredLimiter := ginx.NewDynamicRateLimiter(func(userID string) (rps int, burst int) {
-		// For demo purposes, check query param to determine user type
-		// In real apps, this would query user database
-		if len(userID) > 0 && userID[0] == 'e' { // enterprise users start with 'e'
-			return 200, 400
-		} else if len(userID) > 0 && userID[0] == 'p' { // premium users start with 'p'
-			return 50, 100
-		} else if len(userID) > 0 && userID[0] == 'b' { // basic users start with 'b'
-			return 10, 20
-		}
-		return 5, 10 // Free tier
-	})
-
 	dynamic.GET("/tiered",
 		extractUserID(),
-		tieredLimiter.Middleware()(func(c *gin.Context) {
+		ginx.RateLimit(5, 10, // Default limits for free tier
+			ginx.WithUser(),
+			ginx.WithDynamicLimits(func(key string) (rps int, burst int) {
+				// Extract user ID from the key (format is "user:userID")
+				if strings.HasPrefix(key, "user:") {
+					userID := strings.TrimPrefix(key, "user:")
+					// For demo purposes, check first character to determine user type
+					// In real apps, this would query user database
+					if len(userID) > 0 {
+						switch userID[0] {
+						case 'e': // enterprise users start with 'e'
+							return 200, 400
+						case 'p': // premium users start with 'p'
+							return 50, 100
+						case 'b': // basic users start with 'b'
+							return 10, 20
+						}
+					}
+				}
+				return 5, 10 // Free tier
+			}))(func(c *gin.Context) {
 			userID, _ := c.Get("user_id")
 			userIDStr := userID.(string)
 
@@ -297,7 +303,6 @@ func setupSpecialFeatures(r *gin.Engine) {
 }
 
 // setupConditionalArchitecture demonstrates Ginx's core conditional architecture
-// This showcases the unique "极简 + 可组合 + 条件执行" design philosophy
 func setupConditionalArchitecture(r *gin.Engine) {
 	conditional := r.Group("/conditional")
 
