@@ -281,7 +281,7 @@ func TestConvenienceFunctions(t *testing.T) {
 		middleware := RateLimitByUser(10, 5)
 
 		c, w := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		handler := middleware(func(c *gin.Context) {
 			c.JSON(200, gin.H{"success": true})
@@ -588,7 +588,7 @@ func TestKeyFunctions(t *testing.T) {
 	t.Run("KeyByUserID should use user_id when available", func(t *testing.T) {
 		keyFunc := KeyByUserID()
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		key := keyFunc(c)
 		assert.Equal(t, "user:user123", key)

@@ -589,14 +589,12 @@ func KeyByIP() func(*gin.Context) string {
 }
 
 // KeyByUserID returns a key function that uses the authenticated user ID for rate limiting.
-// It looks for 'user_id' in the Gin context and falls back to IP if not found.
+// It looks for user ID in the Gin context and falls back to IP if not found.
 // User IDs are prefixed with 'user:' to avoid conflicts with IP addresses.
 func KeyByUserID() func(*gin.Context) string {
 	return func(c *gin.Context) string {
-		if userID, exists := c.Get("user_id"); exists {
-			if id, ok := userID.(string); ok {
-				return "user:" + id
-			}
+		if userID, exists := GetUserID(c); exists {
+			return "user:" + userID
 		}
 		return c.ClientIP() // Fallback to IP
 	}

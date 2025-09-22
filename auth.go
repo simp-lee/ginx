@@ -46,11 +46,11 @@ func Auth(jwtService jwt.Service) Middleware {
 			}
 
 			// Set user information to context
-			c.Set("user_id", parsedToken.UserID)
-			c.Set("user_roles", parsedToken.Roles)
-			c.Set("token_id", parsedToken.TokenID)
-			c.Set("token_expires_at", parsedToken.ExpiresAt)
-			c.Set("token_issued_at", parsedToken.IssuedAt)
+			SetUserID(c, parsedToken.UserID)
+			SetUserRoles(c, parsedToken.Roles)
+			SetTokenID(c, parsedToken.TokenID)
+			SetTokenExpiresAt(c, parsedToken.ExpiresAt)
+			SetTokenIssuedAt(c, parsedToken.IssuedAt)
 
 			next(c)
 		}
@@ -70,16 +70,4 @@ func extractToken(c *gin.Context) string {
 	}
 
 	return ""
-}
-
-// getUserID extracts the user ID from the context.
-func getUserID(c *gin.Context) (string, bool) {
-	userID, exists := c.Get("user_id")
-	if !exists {
-		return "", false
-	}
-	if id, ok := userID.(string); ok {
-		return id, true
-	}
-	return "", false
 }

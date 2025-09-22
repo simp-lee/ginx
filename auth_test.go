@@ -147,9 +147,9 @@ func TestAuthMiddleware(t *testing.T) {
 
 		authMiddleware := Auth(mockJWT)
 		handler := authMiddleware(func(c *gin.Context) {
-			contextUserID, _ = c.Get("user_id")
-			contextRoles, _ = c.Get("user_roles")
-			contextTokenID, _ = c.Get("token_id")
+			contextUserID, _ = GetUserID(c)
+			contextRoles, _ = GetUserRoles(c)
+			contextTokenID, _ = GetTokenID(c)
 			c.JSON(200, gin.H{"success": true})
 		})
 
@@ -263,9 +263,9 @@ func TestGetUserID(t *testing.T) {
 
 	t.Run("should return user ID when exists in context", func(t *testing.T) {
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
-		userID, exists := getUserID(c)
+		userID, exists := GetUserID(c)
 		assert.True(t, exists)
 		assert.Equal(t, "user123", userID)
 	})
@@ -273,7 +273,7 @@ func TestGetUserID(t *testing.T) {
 	t.Run("should return false when user_id not set in context", func(t *testing.T) {
 		c, _ := TestContext("GET", "/test", nil)
 
-		userID, exists := getUserID(c)
+		userID, exists := GetUserID(c)
 		assert.False(t, exists)
 		assert.Equal(t, "", userID)
 	})
@@ -282,7 +282,7 @@ func TestGetUserID(t *testing.T) {
 		c, _ := TestContext("GET", "/test", nil)
 		c.Set("user_id", 12345) // Not a string
 
-		userID, exists := getUserID(c)
+		userID, exists := GetUserID(c)
 		assert.False(t, exists)
 		assert.Equal(t, "", userID)
 	})
@@ -291,7 +291,7 @@ func TestGetUserID(t *testing.T) {
 		c, _ := TestContext("GET", "/test", nil)
 		c.Set("user_id", nil)
 
-		userID, exists := getUserID(c)
+		userID, exists := GetUserID(c)
 		assert.False(t, exists)
 		assert.Equal(t, "", userID)
 	})

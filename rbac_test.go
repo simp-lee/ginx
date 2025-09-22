@@ -191,9 +191,9 @@ func TestGetUserIDOrAbort(t *testing.T) {
 
 	t.Run("should return user ID when authenticated", func(t *testing.T) {
 		c, w := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
-		userID, ok := getUserIDOrAbort(c)
+		userID, ok := GetUserIDOrAbort(c)
 		assert.True(t, ok)
 		assert.Equal(t, "user123", userID)
 		assert.Equal(t, http.StatusOK, w.Code) // Should not abort
@@ -203,7 +203,7 @@ func TestGetUserIDOrAbort(t *testing.T) {
 		c, w := TestContext("GET", "/test", nil)
 		// Don't set user_id in context
 
-		userID, ok := getUserIDOrAbort(c)
+		userID, ok := GetUserIDOrAbort(c)
 		assert.False(t, ok)
 		assert.Equal(t, "", userID)
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -217,7 +217,7 @@ func TestGetUserIDOrAbort(t *testing.T) {
 		c, w := TestContext("GET", "/test", nil)
 		c.Set("user_id", 12345) // Not a string
 
-		userID, ok := getUserIDOrAbort(c)
+		userID, ok := GetUserIDOrAbort(c)
 		assert.False(t, ok)
 		assert.Equal(t, "", userID)
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -230,7 +230,7 @@ func TestRequirePermission(t *testing.T) {
 	t.Run("should allow access when user has permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, w := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasPermission", "user123", "posts", "read").Return(true, nil)
 
@@ -248,7 +248,7 @@ func TestRequirePermission(t *testing.T) {
 	t.Run("should return 403 when user lacks permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, w := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasPermission", "user123", "posts", "delete").Return(false, nil)
 
@@ -293,7 +293,7 @@ func TestRequirePermission(t *testing.T) {
 	t.Run("should return 500 when permission check fails", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, w := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasPermission", "user123", "posts", "read").Return(false, errors.New("database error"))
 
@@ -320,7 +320,7 @@ func TestRequireRolePermission(t *testing.T) {
 	t.Run("should allow access when user has role permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, w := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasRolePermission", "user123", "admin", "access").Return(true, nil)
 
@@ -338,7 +338,7 @@ func TestRequireRolePermission(t *testing.T) {
 	t.Run("should return 403 when user lacks role permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, w := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasRolePermission", "user123", "admin", "access").Return(false, nil)
 
@@ -365,7 +365,7 @@ func TestRequireUserPermission(t *testing.T) {
 	t.Run("should allow access when user has direct permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, w := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasUserPermission", "user123", "users", "update").Return(true, nil)
 
@@ -383,7 +383,7 @@ func TestRequireUserPermission(t *testing.T) {
 	t.Run("should return 403 when user lacks direct permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, w := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasUserPermission", "user123", "users", "delete").Return(false, nil)
 
@@ -409,7 +409,7 @@ func TestIsAuthenticated(t *testing.T) {
 
 	t.Run("should return true when user is authenticated", func(t *testing.T) {
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		condition := IsAuthenticated()
 		result := condition(c)
@@ -444,7 +444,7 @@ func TestHasPermission(t *testing.T) {
 	t.Run("should return true when user has permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasPermission", "user123", "posts", "read").Return(true, nil)
 
@@ -458,7 +458,7 @@ func TestHasPermission(t *testing.T) {
 	t.Run("should return false when user lacks permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasPermission", "user123", "posts", "delete").Return(false, nil)
 
@@ -485,7 +485,7 @@ func TestHasPermission(t *testing.T) {
 	t.Run("should return false when permission check fails", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasPermission", "user123", "posts", "read").Return(false, errors.New("database error"))
 
@@ -503,7 +503,7 @@ func TestHasRolePermission(t *testing.T) {
 	t.Run("should return true when user has role permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasRolePermission", "user123", "admin", "access").Return(true, nil)
 
@@ -517,7 +517,7 @@ func TestHasRolePermission(t *testing.T) {
 	t.Run("should return false when user lacks role permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasRolePermission", "user123", "admin", "access").Return(false, nil)
 
@@ -535,7 +535,7 @@ func TestHasUserPermission(t *testing.T) {
 	t.Run("should return true when user has direct permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasUserPermission", "user123", "users", "update").Return(true, nil)
 
@@ -549,7 +549,7 @@ func TestHasUserPermission(t *testing.T) {
 	t.Run("should return false when user lacks direct permission", func(t *testing.T) {
 		mockRBAC := new(MockRBACService)
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", "user123")
+		SetUserID(c, "user123")
 
 		mockRBAC.On("HasUserPermission", "user123", "users", "delete").Return(false, nil)
 
@@ -586,7 +586,7 @@ func TestRBACMiddlewareIntegration(t *testing.T) {
 
 		t.Run("admin should have all permissions", func(t *testing.T) {
 			c, w := TestContext("GET", "/test", nil)
-			c.Set("user_id", "admin123")
+			SetUserID(c, "admin123")
 
 			middleware := RequirePermission(rbacService, "users", "delete")
 			handler := middleware(func(c *gin.Context) {
@@ -600,7 +600,7 @@ func TestRBACMiddlewareIntegration(t *testing.T) {
 
 		t.Run("user should not have delete permission", func(t *testing.T) {
 			c, w := TestContext("GET", "/test", nil)
-			c.Set("user_id", "user123")
+			SetUserID(c, "user123")
 
 			middleware := RequirePermission(rbacService, "users", "delete")
 			handler := middleware(func(c *gin.Context) {

@@ -9,21 +9,11 @@ import (
 // Middleware - RBAC Authorization
 // ============================================================================
 
-// getUserIDOrAbort get user ID from context or abort with 401
-func getUserIDOrAbort(c *gin.Context) (string, bool) {
-	userID, exists := getUserID(c)
-	if !exists {
-		c.AbortWithStatusJSON(401, gin.H{"error": "user not authenticated"})
-		return "", false
-	}
-	return userID, true
-}
-
 // RequirePermission based on roles and direct user permission checking middleware
 func RequirePermission(service rbac.Service, resource, action string) Middleware {
 	return func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
-			userID, ok := getUserIDOrAbort(c)
+			userID, ok := GetUserIDOrAbort(c)
 			if !ok {
 				return
 			}
@@ -48,7 +38,7 @@ func RequirePermission(service rbac.Service, resource, action string) Middleware
 func RequireRolePermission(service rbac.Service, resource, action string) Middleware {
 	return func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
-			userID, ok := getUserIDOrAbort(c)
+			userID, ok := GetUserIDOrAbort(c)
 			if !ok {
 				return
 			}
@@ -73,7 +63,7 @@ func RequireRolePermission(service rbac.Service, resource, action string) Middle
 func RequireUserPermission(service rbac.Service, resource, action string) Middleware {
 	return func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
-			userID, ok := getUserIDOrAbort(c)
+			userID, ok := GetUserIDOrAbort(c)
 			if !ok {
 				return
 			}
@@ -101,7 +91,7 @@ func RequireUserPermission(service rbac.Service, resource, action string) Middle
 // IsAuthenticated checks if the user is authenticated
 func IsAuthenticated() Condition {
 	return func(c *gin.Context) bool {
-		_, exists := getUserID(c)
+		_, exists := GetUserID(c)
 		return exists
 	}
 }
@@ -109,7 +99,7 @@ func IsAuthenticated() Condition {
 // HasPermission checks combined role and direct user permissions
 func HasPermission(service rbac.Service, resource, action string) Condition {
 	return func(c *gin.Context) bool {
-		userID, exists := getUserID(c)
+		userID, exists := GetUserID(c)
 		if !exists {
 			return false
 		}
@@ -121,7 +111,7 @@ func HasPermission(service rbac.Service, resource, action string) Condition {
 // HasRolePermission checks role based permissions only
 func HasRolePermission(service rbac.Service, resource, action string) Condition {
 	return func(c *gin.Context) bool {
-		userID, exists := getUserID(c)
+		userID, exists := GetUserID(c)
 		if !exists {
 			return false
 		}
@@ -133,7 +123,7 @@ func HasRolePermission(service rbac.Service, resource, action string) Condition 
 // HasUserPermission checks direct user permissions only
 func HasUserPermission(service rbac.Service, resource, action string) Condition {
 	return func(c *gin.Context) bool {
-		userID, exists := getUserID(c)
+		userID, exists := GetUserID(c)
 		if !exists {
 			return false
 		}
