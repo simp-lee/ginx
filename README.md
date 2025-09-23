@@ -29,14 +29,15 @@ import (
 func main() {
     r := gin.New()
 
-    // Basic middleware stack
-    r.Use(
-        ginx.Recovery(),                        // Panic protection with logging
-        ginx.Logger(),                          // Structured request logging  
-        ginx.Timeout(),                         // 30s timeout protection
-        ginx.CORS(ginx.WithAllowOrigins("*")),  // CORS for development
-        ginx.RateLimit(100, 200),               // 100 RPS, 200 burst per IP
-    )
+    // Basic middleware stack (recommended order)
+    r.Use(ginx.NewChain().
+        Use(ginx.RequestID()).                // Correlation id first
+        Use(ginx.Recovery()).                 // Panic protection with logging
+        Use(ginx.Logger()).                   // Structured request logging
+        Use(ginx.Timeout()).                  // 30s timeout protection
+        Use(ginx.CORS(ginx.WithAllowOrigins("*"))). // CORS for development
+        Use(ginx.RateLimit(100, 200)).        // 100 RPS, 200 burst per IP
+        Build())
 
     r.GET("/", func(c *gin.Context) {
         c.JSON(200, gin.H{"message": "Hello World"})
@@ -57,6 +58,7 @@ func main() {
 ```go
 // Build conditional middleware chain
 chain := ginx.NewChain().
+    Use(ginx.RequestID()).
     Use(ginx.Recovery()).
     Use(ginx.Logger()).
     // Apply rate limiting only to API routes
@@ -137,6 +139,23 @@ Conditions are lightweight functions of type `func(*gin.Context) bool` used to d
 - `HasUserPermission(service rbac.Service, resource, action string)` - Direct user permissions only
 
 ## Middleware Overview
+
+### RequestID (correlation id)
+
+Lightweight request correlation ID middleware. It sets/propagates a unique ID via header (default: `X-Request-ID`) and stores it in context for logs and error handling.
+
+**Usage:**
+- `RequestID(options...)` - Adds/propagates request id
+
+**Options:**
+- `WithRequestIDHeader(name)` - Change header name (default: `X-Request-ID`)
+- `WithRequestIDGenerator(func() string)` - Custom ID generator
+- Default respects incoming header if present; use `WithIgnoreIncoming()` to always generate a new ID
+
+**Notes:**
+- Logging and Recovery middlewares automatically include `request_id` if present
+- Place RequestID early in the chain (before Logger/Recovery) so all logs include the id
+- The middleware also echoes the ID back in the response header
 
 ### Recovery (panic protection)
 

@@ -49,26 +49,36 @@ func RecoveryWith(handler RecoveryHandler, loggerOptions ...logger.Option) Middl
 					// Log panic information
 					if brokenPipe {
 						// Only log basic information, do not log stack trace
-						log.Warn("Connection broken",
+						fields := []any{
 							"error", fmt.Sprintf("%v", err),
 							"path", c.Request.URL.Path,
 							"method", c.Request.Method,
 							"ip", c.ClientIP(),
-						)
+						}
+						if rid, ok := GetRequestID(c); ok && rid != "" {
+							fields = append(fields, "request_id", rid)
+						}
+						log.Warn("Connection broken", fields...)
 						// Write response is not possible when the connection is broken, so just abort
-						c.Error(err.(error))
+						if e, ok := err.(error); ok {
+							c.Error(e)
+						}
 						c.Abort()
 					} else {
 						// Log full stack trace for actual panics
 						stack := getStack()
-						log.Error("Panic recovered",
+						fields := []any{
 							"error", fmt.Sprintf("%v", err),
 							"path", c.Request.URL.Path,
 							"method", c.Request.Method,
 							"ip", c.ClientIP(),
 							"user_agent", c.Request.UserAgent(),
 							"stack", stack,
-						)
+						}
+						if rid, ok := GetRequestID(c); ok && rid != "" {
+							fields = append(fields, "request_id", rid)
+						}
+						log.Error("Panic recovered", fields...)
 						// Call recovery handler
 						handler(c, err)
 					}

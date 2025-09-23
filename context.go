@@ -20,6 +20,7 @@ const (
 	tokenIDKey        contextKey = "ginx.token_id"
 	tokenExpiresAtKey contextKey = "ginx.token_expires_at"
 	tokenIssuedAtKey  contextKey = "ginx.token_issued_at"
+	requestIDKey      contextKey = "ginx.request_id"
 )
 
 // ============================================================================
@@ -113,6 +114,27 @@ func GetTokenIssuedAt(c *gin.Context) (time.Time, bool) {
 		return t, true
 	}
 	return time.Time{}, false
+}
+
+// ============================================================================
+// Request Context Helpers
+// ============================================================================
+
+// SetRequestID sets the request ID in the context
+func SetRequestID(c *gin.Context, id string) {
+	c.Set(string(requestIDKey), id)
+}
+
+// GetRequestID gets the request ID from the context
+func GetRequestID(c *gin.Context) (string, bool) {
+	value, exists := c.Get(string(requestIDKey))
+	if !exists {
+		return "", false
+	}
+	if id, ok := value.(string); ok {
+		return id, true
+	}
+	return "", false
 }
 
 // ============================================================================

@@ -42,6 +42,10 @@ func Logger(options ...logger.Option) Middleware {
 				"referer", c.Request.Referer(),
 			}
 
+			if rid, ok := GetRequestID(c); ok && rid != "" {
+				fields = append(fields, "request_id", rid)
+			}
+
 			// Log based on status code
 			switch {
 			case status >= 500:
@@ -54,10 +58,11 @@ func Logger(options ...logger.Option) Middleware {
 
 			// Log errors if any
 			if len(c.Errors) > 0 {
-				log.Error("Request errors",
-					"path", path,
-					"errors", c.Errors.String(),
-				)
+				errFields := []any{"path", path, "errors", c.Errors.String()}
+				if rid, ok := GetRequestID(c); ok && rid != "" {
+					errFields = append(errFields, "request_id", rid)
+				}
+				log.Error("Request errors", errFields...)
 			}
 		}
 	}
