@@ -6,7 +6,7 @@ Minimal, composable, and high-performance middleware toolkit for Gin, with condi
 
 - Functional composition: Chain + Condition to precisely control execution
 - Production-ready: recovery, logging, timeout, CORS, auth, RBAC, cache, rate limit
-- High performance: zero-allocation conditions, token-bucket rate limiting, sharded cache
+- High performance: zero-allocation conditions, token-bucket & time-window rate limiting, sharded cache
 - Clean API: unified Option/Condition pattern, easy to extend
 
 ## Installation
@@ -63,6 +63,8 @@ chain := ginx.NewChain().
     Use(ginx.Logger()).
     // Apply rate limiting only to API routes
     When(ginx.PathHasPrefix("/api/"), ginx.RateLimit(100, 200)).
+    // Add hourly quota for API routes
+    When(ginx.PathHasPrefix("/api/"), ginx.RateLimitPerHour(10000)).
     // Apply CORS only to browser requests  
     When(ginx.HeaderExists("Origin"), ginx.CORS(ginx.WithAllowOrigins("*"))).
     // Longer timeout for heavy operations
@@ -411,9 +413,13 @@ r.Use(ginx.NewChain().
     Build())
 ```
 
-### Rate Limit (token bucket)
+### Rate Limit (token bucket & time windows)
 
-High-performance token bucket rate limiting middleware with flexible key generation and dynamic limits.
+High-performance rate limiting middleware supporting both token bucket (RPS) and time-window strategies (per minute/hour/day).
+
+#### Token Bucket Rate Limiting (RPS)
+
+Smooth rate limiting using token bucket algorithm for requests per second.
 
 **Usage:**
 - `RateLimit(rps int, burst int, opts ...RateOption)` - Token bucket rate limiting with configurable options
@@ -452,10 +458,6 @@ Retry-After: 3                       // Seconds to wait (429 responses only)
 Note:
 - In unlimited mode (both `rps` and `burst` are `<= 0`), no `X-RateLimit-*` headers are returned.
 
-**Resource management:**
-- Built-in shared memory store with automatic cleanup
-- Call `ginx.CleanupRateLimiters()` on application shutdown for comprehensive cleanup
-
 **Example:**
 ```go
 // Basic IP-based rate limiting: 100 rps, burst 200
@@ -473,6 +475,113 @@ r.Use(ginx.RateLimit(0, 0,
     }),
 ))
 ```
+
+#### Time-Window Rate Limiting (Per Minute/Hour/Day)
+
+Fixed window rate limiting for precise quota management.
+
+**Usage:**
+- `RateLimitPerMinute(limit int, opts ...RateOption)` - Maximum requests per minute
+- `RateLimitPerHour(limit int, opts ...RateOption)` - Maximum requests per hour
+- `RateLimitPerDay(limit int, opts ...RateOption)` - Maximum requests per day
+
+**Supported options:**
+- `WithIP()` - IP-based limiting (default)
+- `WithUser()` - Per-user limiting
+- `WithPath()` - Per-path limiting
+- `WithKeyFunc()` - Custom key function
+- `WithSkipFunc()` - Skip certain requests
+- `WithWindowStore(store WindowCounterStore)` - Custom storage backend
+- `WithDynamicWindowLimits(getLimit func(key string) int)` - Dynamic per-key limits
+- `WithoutRateLimitHeaders()` - Disable headers
+- `WithoutRetryAfterHeader()` - Disable Retry-After header
+
+**Note:** Time-window rate limiting does not support `WithWait()` option.
+
+**Features:**
+- **Fixed window algorithm**: Precise quota control within time windows
+- **Window reset times**: 
+  - Minute: At 0 seconds of each minute (e.g., 14:35:00)
+  - Hour: At 0 minutes of each hour (e.g., 14:00:00)
+  - Day: At midnight each day (00:00:00)
+- **Independent counters**: Each window maintains its own counter
+- **Automatic cleanup**: Expired counters are automatically removed
+- **Thread-safe**: Designed for high-concurrency environments
+
+**HTTP headers:**
+```
+X-RateLimit-Limit-Minute: 60         // Maximum per minute
+X-RateLimit-Remaining-Minute: 45     // Remaining this minute
+X-RateLimit-Reset-Minute: 1234567890 // Window reset time (Unix timestamp)
+Retry-After: 15                      // Seconds until window resets (429 only)
+```
+
+**Example:**
+```go
+// Limit to 60 requests per minute
+r.Use(ginx.RateLimitPerMinute(60))
+
+// Limit to 1000 requests per hour per user
+r.Use(ginx.RateLimitPerHour(1000, ginx.WithUser()))
+
+// Limit to 10000 requests per day
+r.Use(ginx.RateLimitPerDay(10000))
+
+// Dynamic per-user limits based on user tier
+r.Use(ginx.RateLimitPerHour(0, // Base limit ignored when using dynamic limits
+    ginx.WithUser(),
+    ginx.WithDynamicWindowLimits(func(key string) int {
+        if strings.Contains(key, "user:premium_") {
+            return 100000  // Premium: 100k per hour
+        }
+        if strings.Contains(key, "user:pro_") {
+            return 10000   // Pro: 10k per hour
+        }
+        return 1000        // Free: 1k per hour
+    }),
+))
+```
+
+#### Combined Rate Limiting (Recommended)
+
+Combine RPS and time-window rate limiting for multi-layer protection.
+
+**Usage:**
+```go
+// Two-layer protection: RPS + hourly quota
+r.Use(ginx.NewChain().
+    Use(ginx.RateLimit(10, 20)).       // Prevent instant spikes
+    Use(ginx.RateLimitPerHour(1000)).  // Hourly quota management
+    Build())
+
+// Three-layer protection: RPS + hourly + daily quota
+r.Use(ginx.NewChain().
+    Use(ginx.RateLimit(5, 10)).        // Instant protection
+    Use(ginx.RateLimitPerHour(1000)).  // Hourly quota
+    Use(ginx.RateLimitPerDay(10000)).  // Daily quota
+    Build())
+```
+
+**Use cases:**
+- **Public APIs**: Moderate RPS + daily quota
+- **Premium users**: High RPS + generous hourly/daily quota
+- **Sensitive operations**: Strict RPS + low hourly/daily quota
+- **Heavy endpoints**: Low RPS + low hourly quota
+
+**Response headers** when combined:
+```
+X-RateLimit-Limit: 10
+X-RateLimit-Remaining: 9
+X-RateLimit-Reset: 1700000001      // Unix timestamp when the bucket refills
+X-RateLimit-Limit-Hour: 1000
+X-RateLimit-Remaining-Hour: 850
+X-RateLimit-Reset-Hour: 1700003600 // Unix timestamp when the hourly window resets
+Retry-After: 30
+```
+
+**Resource management:**
+- Built-in shared memory stores with automatic cleanup
+- Call `ginx.CleanupRateLimiters()` on application shutdown for comprehensive cleanup
 
 ## Advanced Examples
 
@@ -532,9 +641,13 @@ func main() {
             ginx.Timeout(ginx.WithTimeout(60*time.Second))).
         Unless(isHealthPath, 
             ginx.Timeout(ginx.WithTimeout(30*time.Second))).
-        // Rate limiting (skip health checks)
+        // Multi-layer rate limiting (skip health checks)
         When(ginx.Not(isHealthPath), 
             ginx.RateLimit(100, 200)).
+        When(ginx.Not(isHealthPath), 
+            ginx.RateLimitPerHour(10000)).
+        When(ginx.Not(isHealthPath), 
+            ginx.RateLimitPerDay(100000)).
         // JWT authentication for API routes (skip public endpoints)
         When(ginx.And(isAPIPath, ginx.Not(isPublicPath)),
             ginx.Auth(jwtService)).
@@ -580,7 +693,9 @@ func setupMicroservice() gin.HandlerFunc {
         When(ginx.PathHasPrefix("/internal/"), 
             ginx.RateLimit(1000, 2000)).  // High limits for internal services
         When(ginx.PathHasPrefix("/api/public/"), 
-            ginx.RateLimit(10, 20)).      // Low limits for public API
+            ginx.RateLimit(10, 20)).      // Low RPS for public API
+        When(ginx.PathHasPrefix("/api/public/"), 
+            ginx.RateLimitPerHour(1000)). // Hourly quota for public API
         When(ginx.And(
             ginx.PathHasPrefix("/api/"),
             ginx.HeaderExists("X-API-Key"),
@@ -592,7 +707,7 @@ func setupMicroservice() gin.HandlerFunc {
 ### Multi-tenant SaaS Application
 
 ```go
-// Per-tenant rate limiting with dynamic limits based on subscription plan
+// Per-tenant RPS rate limiting with dynamic limits based on subscription plan
 r.Use(ginx.RateLimit(0, 0,
     ginx.WithUser(),  // Rate limit per user
     ginx.WithDynamicLimits(func(key string) (int, int) {
@@ -604,6 +719,20 @@ r.Use(ginx.RateLimit(0, 0,
             return 100, 200    // Pro users: 100 RPS, burst 200
         }
         return 10, 20          // Free users: 10 RPS, burst 20
+    }),
+))
+
+// Per-user hourly quotas based on subscription plan
+r.Use(ginx.RateLimitPerHour(0,
+    ginx.WithUser(),
+    ginx.WithDynamicWindowLimits(func(key string) int {
+        if strings.Contains(key, "user:premium_") {
+            return 100000  // Premium: 100k per hour
+        }
+        if strings.Contains(key, "user:pro_") {
+            return 10000   // Pro: 10k per hour
+        }
+        return 1000        // Free: 1k per hour
     }),
 ))
 
@@ -662,12 +791,102 @@ func setupAdvancedCaching(r *gin.Engine, cache shardedcache.CacheInterface) {
 }
 ```
 
+### Combined Rate Limiting Strategies
+
+```go
+// Multi-layer rate limiting for different scenarios
+func setupRateLimiting(r *gin.Engine) {
+    // Example 1: Public API with burst + quota protection
+    publicAPI := r.Group("/api/public")
+    publicAPI.Use(ginx.NewChain().
+        Use(ginx.RateLimit(10, 20)).        // Prevent instant spikes
+        Use(ginx.RateLimitPerHour(1000)).   // Hourly quota
+        Use(ginx.RateLimitPerDay(10000)).   // Daily quota
+        Build())
+
+    // Example 2: Authenticated API with per-user limits
+    authAPI := r.Group("/api/v1")
+    authAPI.Use(ginx.NewChain().
+        Use(ginx.RateLimit(50, 100, ginx.WithUser())).     // Per-user RPS
+        Use(ginx.RateLimitPerHour(5000, ginx.WithUser())). // Per-user hourly quota
+        Build())
+
+    // Example 3: Heavy operations with strict limits
+    r.POST("/api/heavy-task", 
+        ginx.NewChain().
+            Use(ginx.RateLimit(1, 1)).       // Only 1 request per second
+            Use(ginx.RateLimitPerHour(10)).  // Max 10 per hour
+            Use(ginx.RateLimitPerDay(50)).   // Max 50 per day
+            Build(),
+        handleHeavyTask)
+
+    // Example 4: Path-based rate limiting for different endpoints
+    r.Use(ginx.NewChain().
+        When(ginx.PathHasPrefix("/api/search/"), ginx.NewChain().
+            Use(ginx.RateLimit(5, 10, ginx.WithPath())).
+            Use(ginx.RateLimitPerMinute(50, ginx.WithPath())).
+            Build()).
+        When(ginx.PathHasPrefix("/api/login"), ginx.NewChain().
+            Use(ginx.RateLimit(1, 2, ginx.WithIP())).
+            Use(ginx.RateLimitPerHour(5, ginx.WithIP())).
+            Build()).
+        Build())
+
+    // Example 5: Dynamic per-user tier-based rate limiting
+    r.Use(ginx.NewChain().
+        // RPS based on user tier (supports dynamic limits)
+        Use(ginx.RateLimit(0, 0,
+            ginx.WithUser(),
+            ginx.WithDynamicLimits(getUserRPSLimits))).
+        // Hourly quota based on user tier
+        Use(ginx.RateLimitPerHour(0,
+            ginx.WithUser(),
+            ginx.WithDynamicWindowLimits(getUserHourlyLimits))).
+        // Daily quota based on user tier
+        Use(ginx.RateLimitPerDay(0,
+            ginx.WithUser(),
+            ginx.WithDynamicWindowLimits(getUserDailyLimits))).
+        Build())
+}
+
+func getUserRPSLimits(key string) (int, int) {
+    // Extract user tier from key
+    if strings.Contains(key, "user:premium_") {
+        return 100, 200  // Premium: 100 RPS, burst 200
+    }
+    if strings.Contains(key, "user:pro_") {
+        return 50, 100   // Pro: 50 RPS, burst 100
+    }
+    return 10, 20        // Free: 10 RPS, burst 20
+}
+
+func getUserHourlyLimits(key string) int {
+    if strings.Contains(key, "user:premium_") {
+        return 50000  // Premium: 50k per hour
+    }
+    if strings.Contains(key, "user:pro_") {
+        return 5000   // Pro: 5k per hour
+    }
+    return 500        // Free: 500 per hour
+}
+
+func getUserDailyLimits(key string) int {
+    if strings.Contains(key, "user:premium_") {
+        return 1000000  // Premium: 1M per day
+    }
+    if strings.Contains(key, "user:pro_") {
+        return 100000   // Pro: 100k per day
+    }
+    return 10000        // Free: 10k per day
+}
+```
+
 ## Performance Notes
 
 - **Conditions efficiency**: Most conditions are zero-allocation; `ContentTypeIs` parses MIME (small overhead), and `PathMatches` compiles the regex at condition creation time (not per request).
 - **Functional composition**: Minimal middleware chain overhead with conditional execution
 - **Sharded caching**: Reduced lock contention for high-concurrency scenarios  
-- **Token bucket precision**: Smooth rate limiting with automatic memory cleanup
+- **Rate limiting**: Token bucket for smooth RPS control, fixed window counters for quota management, both with automatic memory cleanup
 - **Compiled patterns**: Cached regex for `PathMatches()` condition
 
 ## Dependencies
