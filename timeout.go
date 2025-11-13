@@ -20,6 +20,7 @@ type bufferedWriter struct {
 	body       *bytes.Buffer
 	headers    http.Header
 	statusCode int
+	statusSet  bool
 	mutex      sync.RWMutex
 	timedOut   atomic.Bool
 	written    bool
@@ -31,6 +32,7 @@ func newBufferedWriter(w gin.ResponseWriter) *bufferedWriter {
 		body:           &bytes.Buffer{},
 		headers:        make(http.Header),
 		statusCode:     200,
+		statusSet:      false,
 	}
 }
 
@@ -55,6 +57,7 @@ func (w *bufferedWriter) WriteHeader(statusCode int) {
 	}
 
 	w.statusCode = statusCode
+	w.statusSet = true
 }
 
 func (w *bufferedWriter) Header() http.Header {
@@ -163,6 +166,28 @@ func (w *bufferedWriter) flushToReal() {
 	w.written = true
 }
 
+// adoptStatusFromOriginal syncs status code from the original writer when no explicit status was set.
+func (w *bufferedWriter) adoptStatusFromOriginal(original gin.ResponseWriter) {
+	if original == nil {
+		return
+	}
+
+	status := original.Status()
+	if status <= 0 {
+		return
+	}
+
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	if w.timedOut.Load() || w.written || w.statusSet {
+		return
+	}
+
+	w.statusCode = status
+	w.statusSet = true
+}
+
 // Status returns the buffered status code, allowing middleware in the chain to read the correct status
 func (w *bufferedWriter) Status() int {
 	w.mutex.RLock()
@@ -262,6 +287,7 @@ func writeTimeoutResponse(originalWriter gin.ResponseWriter, bufferedWriter *buf
 	// Since we're serial now, we can safely access without excessive locking
 	bufferedWriter.mutex.Lock()
 	bufferedWriter.statusCode = http.StatusRequestTimeout
+	bufferedWriter.statusSet = true
 	bufferedWriter.written = true
 	// Clear and replace buffer with actual timeout response to ensure Size() accuracy
 	bufferedWriter.body.Reset()
@@ -294,6 +320,10 @@ func Timeout(options ...Option[TimeoutConfig]) Middleware {
 			// Create buffered writer
 			bufferedWriter := newBufferedWriter(originalWriter)
 			c.Writer = bufferedWriter
+			defer func() {
+				// Restore original writer so downstream Gin logic (e.g. default 404) writes directly.
+				c.Writer = originalWriter
+			}()
 
 			// Create timeout context
 			ctxWithTimeout, cancel := context.WithTimeout(c.Request.Context(), config.Timeout)
@@ -314,6 +344,7 @@ func Timeout(options ...Option[TimeoutConfig]) Middleware {
 				writeTimeoutResponse(originalWriter, bufferedWriter, config)
 			} else {
 				// Handler completed within timeout, flush buffered content
+				bufferedWriter.adoptStatusFromOriginal(originalWriter)
 				bufferedWriter.flushToReal()
 			}
 		}

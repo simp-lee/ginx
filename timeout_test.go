@@ -125,6 +125,37 @@ func TestTimeoutMiddleware(t *testing.T) {
 		assert.Contains(t, w.Body.String(), "success")
 	})
 
+	t.Run("no route keeps 404", func(t *testing.T) {
+		r := gin.New()
+		chain := NewChain().Use(Timeout(WithTimeout(time.Second)))
+		r.Use(chain.Build())
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+		assert.Equal(t, "404 page not found", w.Body.String())
+	})
+
+	t.Run("no method keeps 405", func(t *testing.T) {
+		r := gin.New()
+		r.HandleMethodNotAllowed = true
+		chain := NewChain().Use(Timeout(WithTimeout(time.Second)))
+		r.Use(chain.Build())
+		r.POST("/resource", func(c *gin.Context) {
+			c.Status(http.StatusCreated)
+		})
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/resource", nil)
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+		assert.Equal(t, "405 method not allowed", w.Body.String())
+		assert.Equal(t, "POST", w.Header().Get("Allow"))
+	})
+
 	t.Run("timeout response size accuracy", func(t *testing.T) {
 		r := gin.New()
 
