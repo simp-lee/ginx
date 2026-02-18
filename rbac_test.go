@@ -215,7 +215,7 @@ func TestGetUserIDOrAbort(t *testing.T) {
 
 	t.Run("should abort when user_id is not string", func(t *testing.T) {
 		c, w := TestContext("GET", "/test", nil)
-		c.Set("user_id", 12345) // Not a string
+		c.Set(string(userIDKey), 12345) // Not a string
 
 		userID, ok := GetUserIDOrAbort(c)
 		assert.False(t, ok)
@@ -469,7 +469,7 @@ func TestIsAuthenticated(t *testing.T) {
 
 	t.Run("should return false when user_id is not string", func(t *testing.T) {
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", 12345) // Not a string
+		c.Set(string(userIDKey), 12345) // Not a string
 
 		condition := IsAuthenticated()
 		result := condition(c)

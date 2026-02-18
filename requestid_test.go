@@ -1,6 +1,7 @@
 package ginx
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"regexp"
@@ -279,4 +280,88 @@ func TestRequestID_CustomGenerator(t *testing.T) {
 			t.Fatalf("expected incoming request id %q, got %q", incomingID, got)
 		}
 	})
+}
+
+func TestRequestID_ContextInjector_BackwardCompatibleWhenNil(t *testing.T) {
+	m := RequestID()
+
+	next := func(c *gin.Context) {
+		if id, ok := GetRequestID(c); !ok || id == "" {
+			t.Fatal("request id should still be set in gin context")
+		}
+		c.Status(http.StatusOK)
+		c.Writer.WriteHeaderNow()
+	}
+
+	c, w := TestContext("GET", "/api/test", nil)
+	originalCtx := c.Request.Context()
+	m(next)(c)
+
+	if c.Request.Context() != originalCtx {
+		t.Fatal("request context should remain unchanged when ContextInjector is not set")
+	}
+	if got := w.Header().Get("X-Request-ID"); got == "" {
+		t.Fatal("X-Request-ID response header should still be set")
+	}
+}
+
+func TestRequestID_ContextInjector_UpdatesRequestContext(t *testing.T) {
+	type testContextKey string
+	const (
+		ctxKey    testContextKey = "request_id"
+		requestID string         = "rid-ctx-123"
+	)
+
+	m := RequestID(
+		WithRequestIDGenerator(func() string { return requestID }),
+		WithContextInjector(func(ctx context.Context, id string) context.Context {
+			return context.WithValue(ctx, ctxKey, id)
+		}),
+	)
+
+	next := func(c *gin.Context) {
+		c.Status(http.StatusOK)
+		c.Writer.WriteHeaderNow()
+	}
+
+	c, _ := TestContext("GET", "/api/test", nil)
+	originalCtx := c.Request.Context()
+	m(next)(c)
+
+	if c.Request.Context() == originalCtx {
+		t.Fatal("request context should be replaced when ContextInjector is set")
+	}
+	if got := c.Request.Context().Value(ctxKey); got != requestID {
+		t.Fatalf("expected injected request id %q in request context, got %v", requestID, got)
+	}
+}
+
+func TestRequestID_ContextInjector_ValueAvailableInDownstreamMiddleware(t *testing.T) {
+	type testContextKey string
+	const (
+		ctxKey    testContextKey = "request_id"
+		requestID string         = "rid-downstream-456"
+	)
+
+	var downstreamValue any
+
+	m := RequestID(
+		WithRequestIDGenerator(func() string { return requestID }),
+		WithContextInjector(func(ctx context.Context, id string) context.Context {
+			return context.WithValue(ctx, ctxKey, id)
+		}),
+	)
+
+	downstream := func(c *gin.Context) {
+		downstreamValue = c.Request.Context().Value(ctxKey)
+		c.Status(http.StatusOK)
+		c.Writer.WriteHeaderNow()
+	}
+
+	c, _ := TestContext("GET", "/api/test", nil)
+	m(downstream)(c)
+
+	if downstreamValue != requestID {
+		t.Fatalf("downstream middleware should read injected request id %q from request context, got %v", requestID, downstreamValue)
+	}
 }

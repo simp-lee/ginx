@@ -233,6 +233,11 @@ func Timeout(options ...Option[TimeoutConfig]) Middleware {
 
 // IsTimeout checks if the current request has timed out.
 // Returns true if the request was terminated due to timeout.
+//
+// Note: This function reads the X-Timeout header from c.Writer, which is the
+// original response writer in outer middleware. Inside a timeout-protected handler,
+// c.Writer is a buffered writer and the X-Timeout header may not be visible.
+// Handlers should use c.Request.Context().Done() to detect their own timeout.
 func IsTimeout(c *gin.Context) bool {
 	return c.Writer.Header().Get("X-Timeout") == "true"
 }

@@ -1,6 +1,7 @@
 package ginx
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -33,7 +34,16 @@ type RequestIDConfig struct {
 	// RespectIncoming controls whether to trust and reuse the incoming header value
 	// If false, always override with a new ID
 	RespectIncoming bool
+
+	// ContextInjector enriches Go's context.Context with request metadata such as request_id.
+	// It is optional and nil by default.
+	ContextInjector ContextInjector
 }
+
+// ContextInjector is a function that enriches Go's context.Context with request metadata.
+// This allows attributes like request_id to propagate through the standard context chain
+// and be automatically included in structured logs (e.g., slog with context middleware).
+type ContextInjector func(ctx context.Context, requestID string) context.Context
 
 // RequestID options
 type RequestIDOption = Option[RequestIDConfig]
@@ -51,6 +61,13 @@ func WithRequestIDGenerator(gen func() string) RequestIDOption {
 // WithIgnoreIncoming disables using incoming header value; always generate a new ID
 func WithIgnoreIncoming() RequestIDOption {
 	return func(c *RequestIDConfig) { c.RespectIncoming = false }
+}
+
+// WithContextInjector sets a function that injects the request ID into Go's context.Context.
+// This enables downstream code (service/repository layers) that uses context-aware logging
+// (e.g., slog.InfoContext) to automatically include the request ID in log output.
+func WithContextInjector(injector ContextInjector) RequestIDOption {
+	return func(c *RequestIDConfig) { c.ContextInjector = injector }
 }
 
 // RequestID provides a simple request ID middleware.
@@ -89,6 +106,10 @@ func RequestID(opts ...RequestIDOption) Middleware {
 
 			// Set into context and response header early so downstream can use it
 			SetRequestID(c, id)
+			if cfg.ContextInjector != nil {
+				ctx := cfg.ContextInjector(c.Request.Context(), id)
+				c.Request = c.Request.WithContext(ctx)
+			}
 			c.Writer.Header().Set(cfg.Header, id)
 
 			// Also expose header for browsers when used with CORS

@@ -339,7 +339,7 @@ func TestGetUserID(t *testing.T) {
 
 	t.Run("should return false when user_id is not a string", func(t *testing.T) {
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", 12345) // Not a string
+		c.Set(string(userIDKey), 12345) // Not a string
 
 		userID, exists := GetUserID(c)
 		assert.False(t, exists)
@@ -348,7 +348,7 @@ func TestGetUserID(t *testing.T) {
 
 	t.Run("should handle nil user_id value", func(t *testing.T) {
 		c, _ := TestContext("GET", "/test", nil)
-		c.Set("user_id", nil)
+		c.Set(string(userIDKey), nil)
 
 		userID, exists := GetUserID(c)
 		assert.False(t, exists)

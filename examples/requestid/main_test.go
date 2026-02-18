@@ -37,4 +37,25 @@ func TestRequestIDExampleRoutes(t *testing.T) {
 			t.Fatalf("expected non-empty request_id")
 		}
 	})
+
+	t.Run("log endpoint returns request id and uses context injector", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/log", nil)
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if body["request_id"] == "" {
+			t.Fatalf("expected non-empty request_id")
+		}
+		if body["message"] != "check server logs" {
+			t.Fatalf("expected message 'check server logs', got %v", body["message"])
+		}
+	})
 }

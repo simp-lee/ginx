@@ -144,7 +144,7 @@ Conditions are lightweight functions of type `func(*gin.Context) bool` used to d
 
 ### RequestID (correlation id)
 
-Lightweight request correlation ID middleware. It sets/propagates a unique ID via header (default: `X-Request-ID`) and stores it in context for logs and error handling.
+Lightweight request correlation ID middleware. It sets/propagates a unique ID via header (default: `X-Request-ID`), stores it in Gin context, and can optionally inject the ID into Go's standard `context.Context`.
 
 **Usage:**
 - `RequestID(options...)` - Adds/propagates request id
@@ -152,12 +152,49 @@ Lightweight request correlation ID middleware. It sets/propagates a unique ID vi
 **Options:**
 - `WithRequestIDHeader(name)` - Change header name (default: `X-Request-ID`)
 - `WithRequestIDGenerator(func() string)` - Custom ID generator
+- `WithContextInjector(func(ctx context.Context, requestID string) context.Context)` - Inject request metadata into Go context (for service/repository logging with `slog.InfoContext` etc.)
 - Default respects incoming header if present; use `WithIgnoreIncoming()` to always generate a new ID
+
+**Type:**
+```go
+type ContextInjector func(ctx context.Context, requestID string) context.Context
+```
 
 **Notes:**
 - Logging and Recovery middlewares automatically include `request_id` if present
 - Place RequestID early in the chain (before Logger/Recovery) so all logs include the id
 - The middleware also echoes the ID back in the response header
+
+**Example: inject into Go context (for context-aware slog):**
+```go
+package main
+
+import (
+    "context"
+    "log/slog"
+
+    "github.com/gin-gonic/gin"
+    "github.com/simp-lee/ginx"
+    "github.com/simp-lee/logger"
+)
+
+func main() {
+    r := gin.New()
+
+    r.Use(ginx.RequestID(
+        ginx.WithContextInjector(func(ctx context.Context, id string) context.Context {
+            return logger.WithContextAttrs(ctx, slog.String("request_id", id))
+        }),
+    ))
+
+    r.GET("/users", func(c *gin.Context) {
+        // Service/repository layers can now read request_id from c.Request.Context()
+        // and emit it automatically with slog.InfoContext.
+        slog.InfoContext(c.Request.Context(), "list users")
+        c.JSON(200, gin.H{"ok": true})
+    })
+}
+```
 
 ### Recovery (panic protection)
 
