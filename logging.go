@@ -1,13 +1,20 @@
 package ginx
 
 import (
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/simp-lee/logger"
 )
 
-// Logger create a logging middleware with the given options.
+// Logger creates a logging middleware with the given options.
+//
+// NOTE: This function panics if the logger cannot be created (e.g., invalid file path).
+// This follows the same pattern as regexp.MustCompile — configuration errors are caught
+// at initialization time rather than at request time. Callers should ensure valid logger
+// options are provided.
 func Logger(options ...logger.Option) Middleware {
 	// Initialize the logger
 	log, err := logger.New(options...)
@@ -32,7 +39,7 @@ func Logger(options ...logger.Option) Middleware {
 			fields := []any{
 				"method", c.Request.Method,
 				"path", path,
-				"query", c.Request.URL.RawQuery,
+				"query", sanitizeQueryForLog(c.Request.URL.RawQuery),
 				"status", status,
 				"latency", latency,
 				"ip", c.ClientIP(),
@@ -65,5 +72,34 @@ func Logger(options ...logger.Option) Middleware {
 				log.Error("Request errors", errFields...)
 			}
 		}
+	}
+}
+
+func sanitizeQueryForLog(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return "[UNPARSEABLE_QUERY]"
+	}
+
+	for key := range values {
+		if isSensitiveQueryKey(key) {
+			values.Set(key, "[REDACTED]")
+		}
+	}
+
+	return values.Encode()
+}
+
+func isSensitiveQueryKey(key string) bool {
+	lower := strings.ToLower(key)
+	switch lower {
+	case "token", "access_token", "id_token", "jwt", "authorization", "auth", "password", "secret":
+		return true
+	default:
+		return false
 	}
 }

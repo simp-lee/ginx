@@ -148,8 +148,10 @@ When using multiple rate limiters simultaneously, each sets its own response hea
 ```
 X-RateLimit-Limit: 10
 X-RateLimit-Remaining: 9
-X-RateLimit-Reset: 1
+X-RateLimit-Reset: 1708156801
 ```
+
+`X-RateLimit-Reset` is a Unix timestamp in seconds (unit: Unix seconds timestamp).
 
 ### Time-Window Rate Limiting Headers
 ```

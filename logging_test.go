@@ -277,6 +277,44 @@ func TestLoggingHeaders(t *testing.T) {
 	})
 }
 
+func TestSanitizeQueryForLog(t *testing.T) {
+	t.Run("redacts sensitive fields", func(t *testing.T) {
+		raw := "page=1&token=abc123&access_token=xyz&name=alice"
+		sanitized := sanitizeQueryForLog(raw)
+
+		if strings.Contains(sanitized, "abc123") || strings.Contains(sanitized, "xyz") {
+			t.Fatalf("expected sensitive values to be redacted, got: %s", sanitized)
+		}
+		if !strings.Contains(sanitized, "token=%5BREDACTED%5D") {
+			t.Fatalf("expected token to be redacted, got: %s", sanitized)
+		}
+		if !strings.Contains(sanitized, "access_token=%5BREDACTED%5D") {
+			t.Fatalf("expected access_token to be redacted, got: %s", sanitized)
+		}
+	})
+
+	t.Run("keeps non-sensitive fields unchanged", func(t *testing.T) {
+		raw := "page=1&sort=name"
+		sanitized := sanitizeQueryForLog(raw)
+
+		if sanitized != raw {
+			t.Fatalf("expected non-sensitive query unchanged, got: %s", sanitized)
+		}
+	})
+
+	t.Run("returns safe marker for malformed query without leaking sensitive data", func(t *testing.T) {
+		raw := "token=secret%ZZ&password=hunter2"
+		sanitized := sanitizeQueryForLog(raw)
+
+		if sanitized != "[UNPARSEABLE_QUERY]" {
+			t.Fatalf("expected malformed query marker, got: %s", sanitized)
+		}
+		if strings.Contains(sanitized, "secret") || strings.Contains(sanitized, "hunter2") {
+			t.Fatalf("expected no sensitive leakage, got: %s", sanitized)
+		}
+	})
+}
+
 func TestLoggingErrors(t *testing.T) {
 	t.Run("Logger handles gin context errors", func(t *testing.T) {
 		middleware := Logger()

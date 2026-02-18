@@ -172,9 +172,11 @@ Content-Type: application/json
 
 {
   "error": "rate limit exceeded",
-  "retry_after": 0.1
+  "retry_after": 1
 }
 ```
+
+`retry_after` uses **seconds** as the unit. The value is rounded up to the next whole second and has a minimum of `1`.
 
 ## Code Patterns
 
@@ -188,29 +190,29 @@ r.GET("/api", ginx.RateLimit(10, 20)(func(c *gin.Context) {
 
 ### Advanced Configuration
 ```go
-// Custom rate limiter with configuration
-limiter := ginx.NewRateLimiter(5, 10).
-    WithKeyFunc(func(c *gin.Context) string {
-        return c.ClientIP() + ":" + c.Request.URL.Path
-    }).
-    WithSkipFunc(func(c *gin.Context) bool {
-        return c.GetHeader("Authorization") == "Bearer admin"
-    })
-
-r.GET("/api", limiter.Middleware()(handler))
+// Custom key + skip logic via RateLimit options
+r.GET("/api", ginx.RateLimit(5, 10,
+  ginx.WithKeyFunc(func(c *gin.Context) string {
+    return c.ClientIP() + ":" + c.Request.URL.Path
+  }),
+  ginx.WithSkipFunc(func(c *gin.Context) bool {
+    return c.GetHeader("Authorization") == "Bearer admin"
+  }),
+)(handler))
 ```
 
 ### Dynamic Rate Limiting
 ```go
-// Different limits per user type
-dynamicLimiter := ginx.NewDynamicRateLimiter(func(userID string) (rps, burst int) {
+// Different limits per user type via WithDynamicLimits
+r.GET("/api", ginx.RateLimit(10, 20,
+  ginx.WithUser(),
+  ginx.WithDynamicLimits(func(userID string) (rps, burst int) {
     if isPremiumUser(userID) {
-        return 100, 200
+      return 100, 200
     }
     return 10, 20
-})
-
-r.GET("/api", extractUserID(), dynamicLimiter.Middleware()(handler))
+  }),
+)(handler))
 ```
 
 ### **Core Conditional Architecture - Ginx's Unique Features**

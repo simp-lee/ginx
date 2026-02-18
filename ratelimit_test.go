@@ -1,9 +1,17 @@
 package ginx
 
+// This file intentionally uses per-test NewMemoryLimiterStore instances with
+// defer store.Close() rather than the shared SetupRateLimitTest helper.
+// Each test creates its own isolated store, so there is no global state to
+// clean up. The SetupRateLimitTest helper (see test_helpers.go) is designed
+// for tests that rely on the default shared global store (e.g.,
+// ratelimit_combined_test.go and ratelimit_window_test.go).
+
 import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +19,55 @@ import (
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/time/rate"
 )
+
+type delayedLimiterStore struct {
+	mu       sync.Mutex
+	limiter  *rate.Limiter
+	setCount int
+	delay    time.Duration
+}
+
+func (s *delayedLimiterStore) Get(key string) (*rate.Limiter, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.limiter == nil {
+		return nil, false
+	}
+	return s.limiter, true
+}
+
+func (s *delayedLimiterStore) Set(key string, limiter *rate.Limiter) {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	s.mu.Lock()
+	s.limiter = limiter
+	s.setCount++
+	s.mu.Unlock()
+}
+
+func (s *delayedLimiterStore) Delete(key string) {
+	s.mu.Lock()
+	s.limiter = nil
+	s.mu.Unlock()
+}
+
+func (s *delayedLimiterStore) Clear() {
+	s.mu.Lock()
+	s.limiter = nil
+	s.setCount = 0
+	s.mu.Unlock()
+}
+
+func (s *delayedLimiterStore) Close() error {
+	return nil
+}
+
+func (s *delayedLimiterStore) SetCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.setCount
+}
 
 func TestMemoryLimiterStore(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -242,6 +299,42 @@ func TestRateLimiterBasic(t *testing.T) {
 		assert.GreaterOrEqual(t, remainingInt, 0)
 		assert.LessOrEqual(t, remainingInt, 5)
 	})
+
+	t.Run("should ignore untrusted user header in WithUser", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithUser())
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"success": true})
+		})
+
+		c1, w1 := TestContext("GET", "/test", map[string]string{"X-User-ID": "attacker-a"})
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		c2, w2 := TestContext("GET", "/test", map[string]string{"X-User-ID": "attacker-b"})
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+	})
+
+	t.Run("should allow trusted user header when explicitly configured", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(1, 1, WithStore(store), WithTrustedUserHeader("X-Auth-User"))
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"success": true})
+		})
+
+		c1, w1 := TestContext("GET", "/test", map[string]string{"X-Auth-User": "user1"})
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		c2, w2 := TestContext("GET", "/test", map[string]string{"X-Auth-User": "user2"})
+		handler(c2)
+		assert.Equal(t, http.StatusOK, w2.Code)
+	})
 }
 
 func TestConvenienceFunctions(t *testing.T) {
@@ -385,17 +478,10 @@ func TestRateLimiterEdgeCases(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
 
-	t.Run("should handle zero burst gracefully", func(t *testing.T) {
-		middleware := RateLimit(10, 0)
-		c, w := TestContext("GET", "/test", nil)
-
-		handler := middleware(func(c *gin.Context) {
-			c.JSON(200, gin.H{"success": true})
+	t.Run("should panic on zero burst with positive rps", func(t *testing.T) {
+		assert.PanicsWithValue(t, "ginx: RateLimit called with burst <= 0 and rps > 0; this rejects all requests (use burst >= 1)", func() {
+			RateLimit(10, 0)
 		})
-
-		handler(c)
-		// With 0 burst, should immediately rate limit
-		assert.Equal(t, http.StatusTooManyRequests, w.Code)
 	})
 
 	t.Run("should handle very large values", func(t *testing.T) {
@@ -484,6 +570,39 @@ func TestRateLimiterConcurrency(t *testing.T) {
 		// Total should equal expected
 		assert.Equal(t, numGoroutines*requestsPerGoroutine, successCount+rateLimitedCount)
 	})
+
+	t.Run("should initialize limiter only once on concurrent cold start", func(t *testing.T) {
+		store := &delayedLimiterStore{delay: 15 * time.Millisecond}
+		rl := newRateLimiter(50, 1)
+		rl.store = store
+
+		const workers = 32
+		start := make(chan struct{})
+		limiters := make(chan *rate.Limiter, workers)
+
+		var waitGroup sync.WaitGroup
+		waitGroup.Add(workers)
+
+		for i := 0; i < workers; i++ {
+			go func() {
+				defer waitGroup.Done()
+				<-start
+				limiters <- rl.getLimiter("cold-start-user")
+			}()
+		}
+
+		close(start)
+		waitGroup.Wait()
+		close(limiters)
+
+		distinct := make(map[*rate.Limiter]struct{})
+		for limiter := range limiters {
+			distinct[limiter] = struct{}{}
+		}
+
+		assert.Len(t, distinct, 1, "all goroutines should share the same limiter instance")
+		assert.Equal(t, 1, store.SetCount(), "limiter should be created exactly once")
+	})
 }
 
 func TestRateLimiterHeaders(t *testing.T) {
@@ -544,6 +663,48 @@ func TestRateLimiterHeaders(t *testing.T) {
 func TestRateLimitWithWait(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	t.Run("should panic on zero burst with positive rps in wait mode", func(t *testing.T) {
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		assert.PanicsWithValue(t, "ginx: RateLimit called with burst <= 0 and rps > 0; this rejects all requests (use burst >= 1)", func() {
+			RateLimit(10, 0, WithStore(store), WithWait(100*time.Millisecond))
+		})
+	})
+
+	t.Run("should reject dynamic zero burst in wait mode", func(t *testing.T) {
+		getDynamicLimits := func(key string) (int, int) {
+			if key == "user:zero-burst" {
+				return 10, 0
+			}
+			if key == "user:unlimited" {
+				return 0, 0
+			}
+			return 10, 20
+		}
+
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+		middleware := RateLimit(100, 200, WithStore(store), WithUser(), WithWait(100*time.Millisecond), WithDynamicLimits(getDynamicLimits))
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		zeroBurstCtx, zeroBurstRes := TestContext("GET", "/test", nil)
+		SetUserID(zeroBurstCtx, "zero-burst")
+		handler(zeroBurstCtx)
+
+		assert.Equal(t, http.StatusTooManyRequests, zeroBurstRes.Code)
+		assert.Equal(t, "10", zeroBurstRes.Header().Get("X-RateLimit-Limit"))
+		assert.Equal(t, "0", zeroBurstRes.Header().Get("X-RateLimit-Remaining"))
+		assert.Equal(t, "1", zeroBurstRes.Header().Get("Retry-After"))
+
+		unlimitedCtx, unlimitedRes := TestContext("GET", "/test", nil)
+		SetUserID(unlimitedCtx, "unlimited")
+		handler(unlimitedCtx)
+		assert.Equal(t, http.StatusOK, unlimitedRes.Code)
+	})
+
 	t.Run("should timeout when wait time exceeds limit", func(t *testing.T) {
 		store := NewMemoryLimiterStore(time.Minute)
 		defer store.Close()
@@ -603,6 +764,20 @@ func TestMemoryLimiterStoreEdgeCases(t *testing.T) {
 		retrieved, exists := store.Get("test")
 		assert.True(t, exists)
 		assert.Same(t, limiter, retrieved)
+	})
+
+	t.Run("should not panic with tiny positive maxIdle", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			store := NewMemoryLimiterStore(time.Nanosecond)
+			defer store.Close()
+
+			limiter := rate.NewLimiter(10, 20)
+			store.Set("test", limiter)
+
+			retrieved, exists := store.Get("test")
+			assert.True(t, exists)
+			assert.Same(t, limiter, retrieved)
+		})
 	})
 
 	t.Run("should update access time on Get", func(t *testing.T) {

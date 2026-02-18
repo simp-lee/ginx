@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"sync"
+	"testing"
 
 	"github.com/gin-gonic/gin"
 )
@@ -12,6 +13,15 @@ import (
 // Test utilities and helper functions
 
 var ginTestModeOnce sync.Once
+
+// SetupRateLimitTest registers CleanupRateLimiters via t.Cleanup so tests
+// get automatic cleanup of global rate limiter state without manual defer calls.
+// Call this at the start of any test or subtest that exercises rate limiting.
+func SetupRateLimitTest(t testing.TB) {
+	t.Helper()
+	CleanupRateLimiters()
+	t.Cleanup(CleanupRateLimiters)
+}
 
 // TestContext creates a gin.Context for testing
 func TestContext(method, path string, headers map[string]string) (*gin.Context, *httptest.ResponseRecorder) {

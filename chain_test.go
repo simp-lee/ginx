@@ -371,10 +371,10 @@ func TestChainErrorHandlerExecution(t *testing.T) {
 
 		handler(c)
 
-		// In the current implementation, errorHandler will not be called
-		// This test should fail, proving the problem exists
+		// Verify current behavior: OnError is triggered when middleware reports an error.
+		// The handler receives the last captured error from context.
 		if !errorHandlerCalled {
-			t.Error("ErrorHandler was not called despite middleware reporting an error - this demonstrates the bug")
+			t.Error("ErrorHandler was not called despite middleware reporting an error")
 		}
 		if capturedError == nil {
 			t.Error("ErrorHandler should have received the error from middleware")

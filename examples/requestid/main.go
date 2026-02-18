@@ -9,6 +9,11 @@ import (
 )
 
 func main() {
+	r := newRouter()
+	r.Run(":8080")
+}
+
+func newRouter() *gin.Engine {
 	r := gin.New()
 
 	// Place RequestID first so all downstream middlewares/handlers can use the id
@@ -45,5 +50,5 @@ func main() {
 		},
 	)
 
-	r.Run(":8080")
+	return r
 }

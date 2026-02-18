@@ -184,6 +184,28 @@ func TestCORSPreflightRequests(t *testing.T) {
 				http.StatusForbidden, w.Code)
 		}
 	})
+
+	t.Run("Allow-Headers wildcard should allow arbitrary requested headers", func(t *testing.T) {
+		middleware := CORS(
+			WithAllowOrigins("https://example.com"),
+			WithAllowHeaders("*"),
+		)
+
+		headers := map[string]string{
+			"Origin":                         "https://example.com",
+			"Access-Control-Request-Method":  "POST",
+			"Access-Control-Request-Headers": "X-Custom-Header, X-Trace-ID",
+		}
+
+		c, w := TestContext("OPTIONS", "/api/users", headers)
+
+		middleware(func(c *gin.Context) {})(c)
+
+		if w.Code != http.StatusNoContent {
+			t.Errorf("Expected status %d for wildcard allow-headers, got %d",
+				http.StatusNoContent, w.Code)
+		}
+	})
 }
 
 func TestCORSActualRequests(t *testing.T) {
@@ -272,6 +294,62 @@ func TestCORSActualRequests(t *testing.T) {
 }
 
 func TestCORSHeaderConfiguration(t *testing.T) {
+	t.Run("Preserve existing Vary header on actual request", func(t *testing.T) {
+		middleware := CORS(WithAllowOrigins("https://example.com"))
+
+		headers := map[string]string{
+			"Origin": "https://example.com",
+		}
+
+		c, w := TestContext("GET", "/api/users", headers)
+		c.Header("Vary", "Accept-Encoding")
+
+		middleware(func(c *gin.Context) {
+			c.Status(http.StatusOK)
+		})(c)
+
+		varyHeader := w.Header().Get("Vary")
+		if !strings.Contains(varyHeader, "Accept-Encoding") {
+			t.Errorf("Vary should preserve existing token Accept-Encoding, got: %s", varyHeader)
+		}
+		if !strings.Contains(varyHeader, "Origin") {
+			t.Errorf("Vary should include Origin token, got: %s", varyHeader)
+		}
+	})
+
+	t.Run("Preserve existing Vary values and dedupe CORS preflight tokens", func(t *testing.T) {
+		middleware := CORS(WithAllowOrigins("https://example.com"))
+
+		headers := map[string]string{
+			"Origin":                         "https://example.com",
+			"Access-Control-Request-Method":  "POST",
+			"Access-Control-Request-Headers": "Content-Type",
+		}
+
+		c, w := TestContext("OPTIONS", "/api/users", headers)
+		c.Header("Vary", "accept-encoding, origin")
+
+		middleware(func(c *gin.Context) {})(c)
+
+		varyHeader := w.Header().Get("Vary")
+		expectedTokens := []string{
+			"accept-encoding",
+			"origin",
+			"access-control-request-method",
+			"access-control-request-headers",
+		}
+
+		for _, token := range expectedTokens {
+			if !strings.Contains(strings.ToLower(varyHeader), token) {
+				t.Errorf("Vary should include token %s, got: %s", token, varyHeader)
+			}
+		}
+
+		if strings.Count(strings.ToLower(varyHeader), "origin") != 1 {
+			t.Errorf("Vary should dedupe Origin token case-insensitively, got: %s", varyHeader)
+		}
+	})
+
 	t.Run("Custom allow methods", func(t *testing.T) {
 		middleware := CORS(
 			WithAllowOrigins("https://example.com"),
@@ -346,6 +424,37 @@ func TestCORSHeaderConfiguration(t *testing.T) {
 			if !strings.Contains(exposeHeaders, header) {
 				t.Errorf("Expose-Headers should contain %s, got: %s", header, exposeHeaders)
 			}
+		}
+	})
+
+	t.Run("RequestID and CORS should merge expose headers without dropping RequestID", func(t *testing.T) {
+		requestID := RequestID()
+		cors := CORS(
+			WithAllowOrigins("https://example.com"),
+			WithExposeHeaders("Content-Length", "x-request-id"),
+		)
+
+		headers := map[string]string{
+			"Origin": "https://example.com",
+		}
+
+		c, w := TestContext("GET", "/api/users", headers)
+
+		next := func(c *gin.Context) {
+			c.Status(http.StatusOK)
+		}
+
+		requestID(cors(next))(c)
+
+		exposeHeaders := w.Header().Get("Access-Control-Expose-Headers")
+		if !strings.Contains(exposeHeaders, "X-Request-ID") {
+			t.Fatalf("Expose-Headers should preserve X-Request-ID from RequestID middleware, got: %s", exposeHeaders)
+		}
+		if !strings.Contains(exposeHeaders, "Content-Length") {
+			t.Fatalf("Expose-Headers should include configured Content-Length, got: %s", exposeHeaders)
+		}
+		if strings.Count(strings.ToLower(exposeHeaders), "x-request-id") != 1 {
+			t.Fatalf("Expose-Headers should dedupe x-request-id, got: %s", exposeHeaders)
 		}
 	})
 
@@ -455,6 +564,10 @@ func TestCORSHelperFunctions(t *testing.T) {
 		if !areHeadersAllowed(allowed, " Content-Type , Authorization ") {
 			t.Error("Should handle headers with spaces")
 		}
+
+		if !areHeadersAllowed([]string{"*"}, "X-Any-Header, Another-Header") {
+			t.Error("Wildcard allow-headers should allow arbitrary request headers")
+		}
 	})
 
 	t.Run("isHeaderAllowed", func(t *testing.T) {
@@ -477,6 +590,10 @@ func TestCORSHelperFunctions(t *testing.T) {
 		// Test no match
 		if isHeaderAllowed(allowed, "X-Custom") {
 			t.Error("Should not allow non-matching header")
+		}
+
+		if !isHeaderAllowed([]string{"*"}, "X-Custom") {
+			t.Error("Wildcard allow-headers should match any header")
 		}
 	})
 }
@@ -502,13 +619,51 @@ func TestCORSEdgeCases(t *testing.T) {
 
 		c, w := TestContext("OPTIONS", "/api/users", nil) // No CORS headers
 
+		var nextCalled bool
 		middleware(func(c *gin.Context) {
+			nextCalled = true
 			c.Status(http.StatusOK)
 		})(c)
 
-		// OPTIONS request without Origin should be forbidden
-		if w.Code != http.StatusForbidden {
-			t.Error("OPTIONS request without Origin should be forbidden")
+		// Non-preflight OPTIONS should continue to next handler
+		if !nextCalled {
+			t.Error("OPTIONS request without CORS headers should call next handler")
+		}
+
+		if w.Code != http.StatusOK {
+			t.Error("OPTIONS request without CORS headers should keep handler response")
+		}
+
+		if w.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Error("OPTIONS request without Origin should not set CORS headers")
+		}
+	})
+
+	t.Run("OPTIONS with Origin but missing Access-Control-Request-Method is not preflight", func(t *testing.T) {
+		middleware := CORS(WithAllowOrigins("https://example.com"))
+
+		headers := map[string]string{
+			"Origin": "https://example.com",
+		}
+
+		c, w := TestContext("OPTIONS", "/api/users", headers)
+
+		var nextCalled bool
+		middleware(func(c *gin.Context) {
+			nextCalled = true
+			c.Status(http.StatusOK)
+		})(c)
+
+		if !nextCalled {
+			t.Error("OPTIONS without Access-Control-Request-Method should call next handler")
+		}
+
+		if w.Code != http.StatusOK {
+			t.Error("OPTIONS without Access-Control-Request-Method should keep handler response")
+		}
+
+		if w.Header().Get("Access-Control-Allow-Origin") != "https://example.com" {
+			t.Error("Non-preflight OPTIONS with allowed Origin should still set CORS headers")
 		}
 	})
 

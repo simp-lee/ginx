@@ -22,11 +22,21 @@ func defaultRecoveryHandler(c *gin.Context, err any) {
 }
 
 // Recovery creates a panic recovery middleware.
+//
+// NOTE: This function panics if the logger cannot be created (e.g., invalid file path).
+// This follows the same pattern as regexp.MustCompile — configuration errors are caught
+// at initialization time rather than at request time. Callers should ensure valid logger
+// options are provided.
 func Recovery(options ...logger.Option) Middleware {
 	return RecoveryWith(nil, options...)
 }
 
 // RecoveryWith creates a panic recovery middleware with a custom handler.
+//
+// NOTE: This function panics if the logger cannot be created (e.g., invalid file path).
+// This follows the same pattern as regexp.MustCompile — configuration errors are caught
+// at initialization time rather than at request time. Callers should ensure valid logger
+// options are provided.
 func RecoveryWith(handler RecoveryHandler, loggerOptions ...logger.Option) Middleware {
 	// Create logger instance
 	log, err := logger.New(loggerOptions...)
@@ -93,9 +103,19 @@ func RecoveryWith(handler RecoveryHandler, loggerOptions ...logger.Option) Middl
 
 // getStack retrieves the current stack trace information.
 func getStack() string {
-	var buf [4096]byte
-	n := runtime.Stack(buf[:], false)
-	stack := string(buf[:n])
+	// Start with 4096 bytes and grow until the full stack trace fits.
+	// runtime.Stack returns the number of bytes written; if it equals len(buf),
+	// the trace was likely truncated, so we double the buffer and retry.
+	buf := make([]byte, 4096)
+	for {
+		n := runtime.Stack(buf, false)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, len(buf)*2)
+	}
+	stack := string(buf)
 
 	// Filter out stack frames related to the recovery middleware
 	lines := strings.Split(stack, "\n")
@@ -128,12 +148,18 @@ func getStack() string {
 
 // cleanFunctionName cleans up the function name by removing the package path and fixing special characters.
 func cleanFunctionName(line string) string {
-	// Only process function name lines (those without file paths)
+	// Heuristic: lines containing both "/" and ":" are file path lines (e.g., "/app/main.go:42").
+	// Function name lines may contain "/" (package paths) but rarely contain ":" without a file path.
+	// This heuristic is intentionally conservative — it may skip cleaning some edge-case function
+	// names, but it avoids corrupting file path references in stack traces.
 	if strings.Contains(line, "/") && strings.Contains(line, ":") {
 		return line // This is a file path line, do not process
 	}
 
-	// Remove package path (everything after the last slash)
+	// Remove package path (everything after the last slash).
+	// If no space is found before the last slash (LastIndexByte returns -1),
+	// the substring starts at index 0, which correctly handles lines without
+	// a leading space (e.g., bare function names).
 	if lastSlash := strings.LastIndexByte(line, '/'); lastSlash >= 0 {
 		before := line[:strings.LastIndexByte(line[:lastSlash], ' ')+1]
 		after := line[lastSlash+1:]
@@ -147,8 +173,16 @@ func cleanFunctionName(line string) string {
 }
 
 // isBrokenPipe checks if the error is a broken pipe error.
+// It uses errors.As to properly unwrap nested errors (e.g., fmt.Errorf("%w", opErr)),
+// handling cases where the *net.OpError is wrapped inside another error type.
 func isBrokenPipe(err any) bool {
-	if ne, ok := err.(*net.OpError); ok {
+	e, ok := err.(error)
+	if !ok {
+		return false
+	}
+
+	var ne *net.OpError
+	if errors.As(e, &ne) {
 		var se *os.SyscallError
 		if errors.As(ne, &se) {
 			seStr := strings.ToLower(se.Error())

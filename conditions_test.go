@@ -151,6 +151,15 @@ func TestPathConditions(t *testing.T) {
 			t.Error("PathMatches should return false for non-matching regex pattern")
 		}
 	})
+
+	t.Run("PathMatches - invalid regex panics at init time", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("PathMatches should panic on invalid regex (uses regexp.MustCompile)")
+			}
+		}()
+		_ = PathMatches("[")
+	})
 }
 
 func TestHTTPConditions(t *testing.T) {

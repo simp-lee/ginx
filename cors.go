@@ -85,7 +85,12 @@ func WithMaxAge(maxAge time.Duration) Option[CORSConfig] {
 	}
 }
 
-// CORS creates a CORS middleware (requires explicit origin configuration)
+// CORS creates a CORS middleware (requires explicit origin configuration).
+//
+// NOTE: This function panics if AllowCredentials is true and AllowOrigins contains "*",
+// as this is a security violation per the CORS specification. This follows the same
+// pattern as regexp.MustCompile — configuration errors are caught at initialization
+// time rather than producing silent security vulnerabilities at request time.
 func CORS(options ...Option[CORSConfig]) Middleware {
 	config := defaultCORSConfig()
 	for _, option := range options {
@@ -100,9 +105,10 @@ func CORS(options ...Option[CORSConfig]) Middleware {
 	return func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
 			origin := c.Request.Header.Get("Origin")
+			requestMethod := c.Request.Header.Get("Access-Control-Request-Method")
 
 			// Handle preflight requests
-			if c.Request.Method == http.MethodOptions {
+			if isPreflightRequest(c.Request.Method, origin, requestMethod) {
 				handlePreflight(c, config, origin)
 				return
 			}
@@ -112,6 +118,10 @@ func CORS(options ...Option[CORSConfig]) Middleware {
 			next(c)
 		}
 	}
+}
+
+func isPreflightRequest(method, origin, requestMethod string) bool {
+	return method == http.MethodOptions && origin != "" && requestMethod != ""
 }
 
 // CORSDefault creates a default CORS middleware (for development only)
@@ -141,8 +151,13 @@ func handlePreflight(c *gin.Context, config *CORSConfig, origin string) {
 		return
 	}
 
-	// Set CORS response headers
-	setCORSHeaders(c, config, origin)
+	// Set preflight-specific CORS response headers (includes Allow-Methods and Allow-Headers)
+	setPreflightCORSHeaders(c, config, origin)
+
+	// Set preflight request cache duration (only meaningful in preflight responses per CORS spec)
+	if config.MaxAge > 0 {
+		c.Header("Access-Control-Max-Age", strconv.Itoa(int(config.MaxAge.Seconds())))
+	}
 
 	// Set Vary headers for preflight requests to avoid proxy cache pollution
 	setPreflightVaryHeaders(c)
@@ -152,43 +167,54 @@ func handlePreflight(c *gin.Context, config *CORSConfig, origin string) {
 // handleActualRequest handles actual requests
 func handleActualRequest(c *gin.Context, config *CORSConfig, origin string) {
 	if isOriginAllowed(config.AllowOrigins, origin) {
-		setCORSHeaders(c, config, origin)
+		setActualCORSHeaders(c, config, origin)
 	}
 }
 
-// setCORSHeaders sets CORS response headers
-func setCORSHeaders(c *gin.Context, config *CORSConfig, origin string) {
+// setCORSOriginAndCredentials sets the common CORS headers shared between
+// preflight and actual responses: Access-Control-Allow-Origin and
+// Access-Control-Allow-Credentials.
+func setCORSOriginAndCredentials(c *gin.Context, config *CORSConfig, origin string) {
 	// Set allowed origin
 	if slices.Contains(config.AllowOrigins, "*") {
 		c.Header("Access-Control-Allow-Origin", "*")
 	} else if origin != "" {
 		c.Header("Access-Control-Allow-Origin", origin)
-		c.Header("Vary", "Origin")
-	}
-
-	// Set allowed methods
-	if len(config.AllowMethods) > 0 {
-		c.Header("Access-Control-Allow-Methods", strings.Join(config.AllowMethods, ", "))
-	}
-
-	// Set allowed request headers
-	if len(config.AllowHeaders) > 0 {
-		c.Header("Access-Control-Allow-Headers", strings.Join(config.AllowHeaders, ", "))
-	}
-
-	// Set exposed response headers
-	if len(config.ExposeHeaders) > 0 {
-		c.Header("Access-Control-Expose-Headers", strings.Join(config.ExposeHeaders, ", "))
+		addVaryHeaders(c, "Origin")
 	}
 
 	// Set whether to allow credentials
 	if config.AllowCredentials {
 		c.Header("Access-Control-Allow-Credentials", "true")
 	}
+}
 
-	// Set preflight request cache duration
-	if config.MaxAge > 0 {
-		c.Header("Access-Control-Max-Age", strconv.Itoa(int(config.MaxAge.Seconds())))
+// setPreflightCORSHeaders sets CORS response headers for preflight (OPTIONS) responses.
+// Per the CORS specification, Access-Control-Allow-Methods and Access-Control-Allow-Headers
+// are only meaningful in preflight responses.
+func setPreflightCORSHeaders(c *gin.Context, config *CORSConfig, origin string) {
+	setCORSOriginAndCredentials(c, config, origin)
+
+	// Set allowed methods (preflight only per CORS spec)
+	if len(config.AllowMethods) > 0 {
+		c.Header("Access-Control-Allow-Methods", strings.Join(config.AllowMethods, ", "))
+	}
+
+	// Set allowed request headers (preflight only per CORS spec)
+	if len(config.AllowHeaders) > 0 {
+		c.Header("Access-Control-Allow-Headers", strings.Join(config.AllowHeaders, ", "))
+	}
+}
+
+// setActualCORSHeaders sets CORS response headers for actual (non-preflight) responses.
+// Per the CORS specification, Access-Control-Expose-Headers is only meaningful in
+// actual responses, while Access-Control-Allow-Methods/Headers are omitted.
+func setActualCORSHeaders(c *gin.Context, config *CORSConfig, origin string) {
+	setCORSOriginAndCredentials(c, config, origin)
+
+	// Set exposed response headers (actual response only per CORS spec)
+	if len(config.ExposeHeaders) > 0 {
+		addExposeHeaders(c, config.ExposeHeaders...)
 	}
 }
 
@@ -223,7 +249,8 @@ func areHeadersAllowed(allowedHeaders []string, requestHeaders string) bool {
 func isHeaderAllowed(allowedHeaders []string, header string) bool {
 	header = strings.ToLower(header)
 	return slices.ContainsFunc(allowedHeaders, func(allowed string) bool {
-		return strings.ToLower(allowed) == header
+		allowed = strings.ToLower(strings.TrimSpace(allowed))
+		return allowed == "*" || allowed == header
 	})
 }
 
@@ -232,5 +259,69 @@ func setPreflightVaryHeaders(c *gin.Context) {
 	// Set Vary headers to prevent incorrect caching of preflight responses
 	// This ensures that different combinations of Origin, Method, and Headers
 	// don't share the same cached response
-	c.Header("Vary", "Origin, Access-Control-Request-Method, Access-Control-Request-Headers")
+	addVaryHeaders(c, "Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers")
+}
+
+func addVaryHeaders(c *gin.Context, values ...string) {
+	existing := c.Writer.Header().Values("Vary")
+	merged := make([]string, 0, len(existing)+len(values))
+	seen := make(map[string]struct{}, len(existing)+len(values))
+
+	add := func(v string) {
+		for token := range strings.SplitSeq(v, ",") {
+			token = strings.TrimSpace(token)
+			if token == "" {
+				continue
+			}
+			key := strings.ToLower(token)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, token)
+		}
+	}
+
+	for _, v := range existing {
+		add(v)
+	}
+	for _, v := range values {
+		add(v)
+	}
+
+	if len(merged) > 0 {
+		c.Header("Vary", strings.Join(merged, ", "))
+	}
+}
+
+func addExposeHeaders(c *gin.Context, values ...string) {
+	existing := c.Writer.Header().Values("Access-Control-Expose-Headers")
+	merged := make([]string, 0, len(existing)+len(values))
+	seen := make(map[string]struct{}, len(existing)+len(values))
+
+	add := func(v string) {
+		for token := range strings.SplitSeq(v, ",") {
+			token = strings.TrimSpace(token)
+			if token == "" {
+				continue
+			}
+			key := strings.ToLower(token)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, token)
+		}
+	}
+
+	for _, v := range existing {
+		add(v)
+	}
+	for _, v := range values {
+		add(v)
+	}
+
+	if len(merged) > 0 {
+		c.Header("Access-Control-Expose-Headers", strings.Join(merged, ", "))
+	}
 }

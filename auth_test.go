@@ -163,7 +163,26 @@ func TestAuthMiddleware(t *testing.T) {
 		mockJWT.AssertExpectations(t)
 	})
 
-	t.Run("should extract token from query parameter when header is missing", func(t *testing.T) {
+	t.Run("should reject query token by default when header is missing", func(t *testing.T) {
+		mockJWT := new(MockJWTService)
+		c, w := TestContext("GET", "/test?token=query-token", nil)
+
+		authMiddleware := Auth(mockJWT)
+		handler := authMiddleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		handler(c)
+
+		assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+		var response map[string]interface{}
+		json.Unmarshal(w.Body.Bytes(), &response)
+		assert.Equal(t, "missing token", response["error"])
+		mockJWT.AssertExpectations(t)
+	})
+
+	t.Run("should allow query token when explicitly enabled", func(t *testing.T) {
 		mockJWT := new(MockJWTService)
 		c, w := TestContext("GET", "/test?token=query-token", nil)
 
@@ -175,7 +194,7 @@ func TestAuthMiddleware(t *testing.T) {
 
 		mockJWT.On("ValidateAndParse", "query-token").Return(mockToken, nil)
 
-		authMiddleware := Auth(mockJWT)
+		authMiddleware := Auth(mockJWT, WithAuthQueryToken(true))
 		handler := authMiddleware(func(c *gin.Context) {
 			c.JSON(200, gin.H{"success": true})
 		})
@@ -213,6 +232,12 @@ func TestAuthMiddleware(t *testing.T) {
 	})
 }
 
+func TestAuthMiddleware_NilJWTServicePanics(t *testing.T) {
+	assert.PanicsWithValue(t, "auth middleware requires non-nil jwt service", func() {
+		Auth(nil)
+	})
+}
+
 func TestExtractToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -225,6 +250,33 @@ func TestExtractToken(t *testing.T) {
 		assert.Equal(t, "test-token-123", token)
 	})
 
+	t.Run("should extract token from lowercase bearer scheme", func(t *testing.T) {
+		c, _ := TestContext("GET", "/test", map[string]string{
+			"Authorization": "bearer test-token-lower",
+		})
+
+		token := extractToken(c)
+		assert.Equal(t, "test-token-lower", token)
+	})
+
+	t.Run("should extract token from uppercase bearer scheme", func(t *testing.T) {
+		c, _ := TestContext("GET", "/test", map[string]string{
+			"Authorization": "BEARER test-token-upper",
+		})
+
+		token := extractToken(c)
+		assert.Equal(t, "test-token-upper", token)
+	})
+
+	t.Run("should extract token from mixed case bearer scheme", func(t *testing.T) {
+		c, _ := TestContext("GET", "/test", map[string]string{
+			"Authorization": "BeArEr test-token-mixed",
+		})
+
+		token := extractToken(c)
+		assert.Equal(t, "test-token-mixed", token)
+	})
+
 	t.Run("should return empty string for non-Bearer Authorization header", func(t *testing.T) {
 		c, _ := TestContext("GET", "/test", map[string]string{
 			"Authorization": "Basic dGVzdA==",
@@ -234,10 +286,17 @@ func TestExtractToken(t *testing.T) {
 		assert.Equal(t, "", token)
 	})
 
-	t.Run("should extract token from query parameter when header is missing", func(t *testing.T) {
+	t.Run("should return empty string for query token when fallback is disabled", func(t *testing.T) {
 		c, _ := TestContext("GET", "/test?token=query-token-456", nil)
 
 		token := extractToken(c)
+		assert.Equal(t, "", token)
+	})
+
+	t.Run("should extract token from query parameter when fallback is enabled", func(t *testing.T) {
+		c, _ := TestContext("GET", "/test?token=query-token-456", nil)
+
+		token := extractTokenWithConfig(c, true)
 		assert.Equal(t, "query-token-456", token)
 	})
 

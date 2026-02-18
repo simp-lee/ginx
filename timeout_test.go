@@ -1,11 +1,14 @@
 package ginx
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,6 +222,35 @@ func TestTimeoutMiddleware(t *testing.T) {
 		// Verify actual response content
 		assert.Contains(t, w.Body.String(), "timeout")
 		assert.Contains(t, w.Body.String(), "408")
+	})
+
+	t.Run("timeout response clears stale entity headers", func(t *testing.T) {
+		r := gin.New()
+		chain := NewChain().Use(Timeout(WithTimeout(30 * time.Millisecond)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			c.Header("Content-Length", "999")
+			c.Header("Content-Encoding", "gzip")
+			c.Header("Trailer", "X-Stream-Checksum")
+
+			select {
+			case <-time.After(80 * time.Millisecond):
+				c.JSON(http.StatusOK, gin.H{"message": "ok"})
+			case <-c.Request.Context().Done():
+				return
+			}
+		})
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+		assert.Equal(t, "", w.Header().Get("Content-Encoding"))
+		assert.Equal(t, "", w.Header().Get("Trailer"))
+		assert.NotEqual(t, "999", w.Header().Get("Content-Length"))
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 	})
 }
 
@@ -555,9 +587,13 @@ func TestTimeoutConcurrency(t *testing.T) {
 		})
 
 		// Verify that all IsTimeout calls return the same result
-		if len(timeoutResults) > 0 {
-			firstResult := timeoutResults[0]
-			for _, result := range timeoutResults {
+		mu.Lock()
+		results := make([]bool, len(timeoutResults))
+		copy(results, timeoutResults)
+		mu.Unlock()
+		if len(results) > 0 {
+			firstResult := results[0]
+			for _, result := range results {
 				assert.Equal(t, firstResult, result, "All IsTimeout calls should return same result")
 			}
 		}
@@ -637,6 +673,31 @@ func TestTimeoutEdgeCases(t *testing.T) {
 
 		// Should complete before timeout
 		assert.Equal(t, 200, w.Code)
+	})
+	t.Run("buffer overflow then small writes are not lost", func(t *testing.T) {
+		r := gin.New()
+		chain := NewChain().Use(Timeout(
+			WithTimeout(5*time.Second),
+			WithMaxBufferSize(100), // Small buffer to trigger overflow
+		))
+		r.Use(chain.Build())
+		r.GET("/test", func(c *gin.Context) {
+			c.Writer.WriteHeader(http.StatusOK)
+			// First write: large chunk triggers buffer overflow and direct flush
+			bigChunk := strings.Repeat("A", 200)
+			c.Writer.Write([]byte(bigChunk))
+			// Second write: small trailing data — must NOT be silently lost
+			c.Writer.Write([]byte("TRAILER"))
+		})
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("GET", "/test", nil)
+		r.ServeHTTP(w, req)
+
+		body := w.Body.String()
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, body, strings.Repeat("A", 200), "large chunk should be present")
+		assert.Contains(t, body, "TRAILER", "trailing data after buffer overflow must not be lost")
 	})
 }
 
@@ -854,12 +915,11 @@ func TestTimeoutChain(t *testing.T) {
 	})
 }
 
-// TestTimeoutPreemption tests the behavior of our serial timeout implementation
-// These tests document the current limitations and expected behavior
+// TestTimeoutPreemption tests hard-deadline timeout behavior.
 func TestTimeoutPreemption(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	t.Run("handler ignores context cancellation - timeout detected post-execution", func(t *testing.T) {
+	t.Run("handler ignores context cancellation - returns near timeout deadline", func(t *testing.T) {
 		r := gin.New()
 		chain := NewChain().Use(Timeout(WithTimeout(50 * time.Millisecond)))
 		r.Use(chain.Build())
@@ -890,19 +950,51 @@ func TestTimeoutPreemption(t *testing.T) {
 		t.Logf("Request completed in %v", elapsed)
 		t.Logf("Response code: %d", w.Code)
 
-		// With serial implementation: timeout is detected after handler completes
-		// This is expected behavior - we can't preempt, but we can detect timeout post-execution
 		assert.Equal(t, 408, w.Code, "Should return timeout status even when handler ignores context")
-		assert.Greater(t, elapsed, 150*time.Millisecond, "Handler should run to completion (limitation)")
+		assert.Less(t, elapsed, 130*time.Millisecond, "Response should be returned near timeout deadline")
 
 		// Verify timeout was properly detected and response replaced
 		assert.Contains(t, w.Body.String(), "request timeout")
 		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 
-		t.Logf("✓ Timeout properly detected post-execution (expected serial behavior)")
+		t.Logf("✓ Timeout returns near deadline even for non-cooperative handlers")
 	})
 
-	t.Run("CPU intensive handler without context checking - post-execution timeout", func(t *testing.T) {
+	t.Run("panic after timeout is signaled", func(t *testing.T) {
+		r := gin.New()
+		chain := NewChain().Use(Timeout(WithTimeout(40 * time.Millisecond)))
+		r.Use(chain.Build())
+
+		r.GET("/panic-after-timeout", func(c *gin.Context) {
+			time.Sleep(80 * time.Millisecond)
+			panic("panic-after-timeout")
+		})
+
+		previousErrorWriter := gin.DefaultErrorWriter
+		var errorMu sync.Mutex
+		var errorBuf bytes.Buffer
+		gin.DefaultErrorWriter = &syncWriter{mu: &errorMu, buf: &errorBuf}
+		t.Cleanup(func() {
+			gin.DefaultErrorWriter = previousErrorWriter
+		})
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/panic-after-timeout", nil)
+
+		assert.NotPanics(t, func() {
+			r.ServeHTTP(w, req)
+		})
+		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+
+		assert.Eventually(t, func() bool {
+			errorMu.Lock()
+			logged := errorBuf.String()
+			errorMu.Unlock()
+			return strings.Contains(logged, "panic after deadline") && strings.Contains(logged, "panic-after-timeout")
+		}, 500*time.Millisecond, 10*time.Millisecond)
+	})
+
+	t.Run("CPU intensive handler without context checking - still times out near deadline", func(t *testing.T) {
 		r := gin.New()
 		chain := NewChain().Use(Timeout(WithTimeout(30 * time.Millisecond)))
 		r.Use(chain.Build())
@@ -929,12 +1021,11 @@ func TestTimeoutPreemption(t *testing.T) {
 		t.Logf("CPU intensive request completed in %v", elapsed)
 		t.Logf("Response code: %d", w.Code)
 
-		// Serial implementation detects timeout after CPU work completes
-		assert.Equal(t, 408, w.Code, "Should detect timeout after CPU work")
+		assert.Equal(t, 408, w.Code, "Should timeout even when handler ignores context")
 		assert.Contains(t, w.Body.String(), "request timeout")
-		assert.Greater(t, elapsed, 40*time.Millisecond, "Handler should run longer than timeout")
+		assert.Less(t, elapsed, 90*time.Millisecond, "Response should return near timeout deadline")
 
-		t.Log("✓ CPU intensive handler timed out properly (post-execution)")
+		t.Log("✓ CPU intensive handler timed out near deadline")
 	})
 
 	t.Run("database simulation - cooperative timeout handling", func(t *testing.T) {
@@ -1093,6 +1184,18 @@ func TestTimeoutRaceConditions(t *testing.T) {
 }
 
 // countingWriter wraps ResponseWriter to count write operations
+// syncWriter wraps bytes.Buffer with a mutex for concurrent-safe use as io.Writer.
+type syncWriter struct {
+	mu  *sync.Mutex
+	buf *bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
 type countingWriter struct {
 	gin.ResponseWriter
 	onWrite func()
@@ -1113,12 +1216,12 @@ func TestTimeoutStillWorks(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("timeout still works with chain fix", func(t *testing.T) {
-		var middlewareExecuted = make(map[string]bool)
+		var middlewareExecuted sync.Map
 
 		trackingMiddleware := func(name string) Middleware {
 			return func(next gin.HandlerFunc) gin.HandlerFunc {
 				return func(c *gin.Context) {
-					middlewareExecuted[name] = true
+					middlewareExecuted.Store(name, true)
 					next(c)
 				}
 			}
@@ -1150,10 +1253,12 @@ func TestTimeoutStillWorks(t *testing.T) {
 		assert.Equal(t, "true", w.Header().Get("X-Timeout"), "Should have timeout header")
 
 		// Both middlewares should start executing (chain is fixed)
-		assert.True(t, middlewareExecuted["Before-Timeout"], "Before-Timeout middleware should execute")
-		assert.True(t, middlewareExecuted["After-Timeout"], "After-Timeout middleware should execute (chain fixed)")
+		_, beforeOk := middlewareExecuted.Load("Before-Timeout")
+		assert.True(t, beforeOk, "Before-Timeout middleware should execute")
+		_, afterOk := middlewareExecuted.Load("After-Timeout")
+		assert.True(t, afterOk, "After-Timeout middleware should execute (chain fixed)")
 
-		t.Logf("Middlewares executed: %+v", middlewareExecuted)
+		t.Logf("Middlewares executed: Before-Timeout=%v, After-Timeout=%v", beforeOk, afterOk)
 	})
 }
 
@@ -1182,12 +1287,13 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 		// Should timeout
 		assert.Equal(t, http.StatusRequestTimeout, w.Code)
 
-		// CORS headers should be preserved (set before timeout middleware)
+		// CORS headers should be preserved (set before timeout middleware on originalWriter)
 		assert.Equal(t, "https://example.com", w.Header().Get("Access-Control-Allow-Origin"))
 		assert.Equal(t, "true", w.Header().Get("Access-Control-Allow-Credentials"))
 
-		// Business headers should be preserved (now fixed!)
-		assert.Equal(t, "important", w.Header().Get("X-Business-Data"))
+		// Handler-set headers are NOT guaranteed when handler is still running at timeout.
+		// In production HTTP, headers must be set before the first Write; the handler goroutine
+		// hasn't finished here (50ms sleep > 10ms timeout), so buffered headers are not copied.
 
 		// Timeout marker should be present
 		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
@@ -1229,16 +1335,13 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 
 		assert.Equal(t, http.StatusRequestTimeout, w.Code)
 
-		// Headers set before timeout middleware should be preserved
+		// Headers set before timeout middleware should be preserved (on originalWriter)
 		assert.Equal(t, "trace-abc123", w.Header().Get("X-Trace-ID"))
 		assert.Equal(t, "req-xyz789", w.Header().Get("X-Request-ID"))
 
-		// Headers set after timeout middleware should be preserved (fixed!)
-		assert.Equal(t, "fast", w.Header().Get("X-Response-Time"))
-
-		// Business headers should be preserved (fixed!)
-		assert.Equal(t, "started", w.Header().Get("X-Processing-Status"))
-		assert.Equal(t, "no-cache, must-revalidate", w.Header().Get("Cache-Control"))
+		// Headers set by post-timeout middlewares and handler are on bufferedWriter.
+		// They are only copied when the handler finishes before the timeout response is written.
+		// Here the handler sleeps 50ms > 10ms timeout, so they are not guaranteed.
 	})
 
 	t.Run("Chain: Security headers preserved in timeout scenario", func(t *testing.T) {
@@ -1272,15 +1375,14 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 
 		assert.Equal(t, http.StatusRequestTimeout, w.Code)
 
-		// Security headers should all be preserved
+		// Security headers should all be preserved (set before timeout middleware on originalWriter)
 		assert.Equal(t, "DENY", w.Header().Get("X-Frame-Options"))
 		assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
 		assert.Equal(t, "1; mode=block", w.Header().Get("X-XSS-Protection"))
 		assert.Equal(t, "max-age=31536000", w.Header().Get("Strict-Transport-Security"))
 
-		// API headers should be preserved (fixed!)
-		assert.Equal(t, "v2.1", w.Header().Get("X-API-Version"))
-		assert.Equal(t, "99", w.Header().Get("X-Rate-Limit-Remaining"))
+		// Handler-set headers (X-API-Version, X-Rate-Limit-Remaining) are on bufferedWriter
+		// and not guaranteed when handler is still running at timeout.
 	})
 
 	t.Run("Chain: Complex real-world scenario", func(t *testing.T) {
@@ -1349,28 +1451,21 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 		// Check timeout response content
 		assert.Contains(t, w.Body.String(), "服务繁忙，请稍后重试")
 
-		// CORS headers should be preserved
+		// CORS headers should be preserved (set before timeout middleware on originalWriter)
 		assert.Equal(t, "https://app.example.com", w.Header().Get("Access-Control-Allow-Origin"))
 		assert.Equal(t, "true", w.Header().Get("Access-Control-Allow-Credentials"))
 		assert.Equal(t, "X-Total-Count, X-Rate-Limit-Remaining", w.Header().Get("Access-Control-Expose-Headers"))
 
-		// Tracking headers should be preserved
+		// Tracking headers should be preserved (set before timeout middleware on originalWriter)
 		assert.Equal(t, "req-mobile-app", w.Header().Get("X-Request-ID"))
 		assert.Contains(t, w.Header().Get("X-Trace-ID"), "trace-")
 
-		// Rate limiting headers should be preserved
+		// Rate limiting headers should be preserved (set before timeout middleware on originalWriter)
 		assert.Equal(t, "1000", w.Header().Get("X-Rate-Limit-Limit"))
 		assert.Equal(t, "999", w.Header().Get("X-Rate-Limit-Remaining"))
 
-		// Security headers (after timeout) should be preserved
-		assert.Equal(t, "SAMEORIGIN", w.Header().Get("X-Frame-Options"))
-		assert.Equal(t, "default-src 'self'", w.Header().Get("Content-Security-Policy"))
-
-		// Business headers should be preserved
-		assert.Equal(t, "admin", w.Header().Get("X-User-Role"))
-		assert.Equal(t, "42", w.Header().Get("X-Total-Count"))
-		assert.Equal(t, "private, max-age=300", w.Header().Get("Cache-Control"))
-		assert.Equal(t, `"user-123-v2"`, w.Header().Get("ETag"))
+		// Post-timeout middleware and handler-set headers are on bufferedWriter
+		// and not guaranteed when handler is still running at timeout.
 
 		// Timeout marker
 		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
@@ -1409,16 +1504,102 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 
 		assert.Equal(t, http.StatusRequestTimeout, w.Code)
 
-		// Service headers should be preserved
+		// Service headers should be preserved (set before timeout middleware on originalWriter)
 		assert.Equal(t, "user-service", w.Header().Get("X-Service"))
 		assert.Equal(t, "1.2.3", w.Header().Get("X-Version"))
 
-		// Operation header should be preserved
-		assert.Equal(t, "update", w.Header().Get("X-Operation"))
+		// Handler-set headers (X-Operation) are on bufferedWriter
+		// and not guaranteed when handler is still running at timeout.
 
 		// Custom timeout response should be returned
 		assert.Contains(t, w.Body.String(), "TIMEOUT_ERROR")
 		assert.Contains(t, w.Body.String(), "请求超时，请重试")
 		assert.Contains(t, w.Body.String(), "retry_after")
+	})
+}
+
+func TestTimeoutIsolationRaceCoverage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	chain := NewChain().Use(Timeout(WithTimeout(20 * time.Millisecond)))
+	r.Use(chain.Build())
+
+	r.GET("/race", func(c *gin.Context) {
+		for i := 0; i < 64; i++ {
+			c.Set(fmt.Sprintf("late-key-%d", i), i)
+			time.Sleep(1 * time.Millisecond)
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "done"})
+	})
+
+	const requests = 24
+	var wg sync.WaitGroup
+	var timeoutCount atomic.Int32
+
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			start := time.Now()
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/race", nil)
+			r.ServeHTTP(w, req)
+
+			assert.Less(t, time.Since(start), 120*time.Millisecond)
+			if w.Code == http.StatusRequestTimeout {
+				timeoutCount.Add(1)
+			}
+		}()
+	}
+
+	wg.Wait()
+	assert.Equal(t, int32(requests), timeoutCount.Load())
+}
+
+type testPusherWriter struct {
+	gin.ResponseWriter
+}
+
+func (w *testPusherWriter) Push(_ string, _ *http.PushOptions) error {
+	return nil
+}
+
+func TestBufferedWriterAccessorsAndMergeHelpers(t *testing.T) {
+	t.Run("buffered writer accessors and pusher", func(t *testing.T) {
+		c, _ := TestContext(http.MethodGet, "/buffered", nil)
+		bw := newBufferedWriter(c.Writer, 0)
+
+		assert.Equal(t, 200, bw.Status())
+		assert.False(t, bw.Written())
+		assert.Equal(t, 0, bw.Size())
+
+		bw.WriteHeader(http.StatusCreated)
+		assert.Equal(t, http.StatusCreated, bw.Status())
+
+		n, err := bw.WriteString("hello")
+		assert.NoError(t, err)
+		assert.Equal(t, 5, n)
+		assert.Equal(t, 5, bw.Size())
+
+		bw.WriteHeaderNow()
+		assert.False(t, bw.Written())
+
+		assert.Nil(t, bw.Pusher())
+
+		wrapped := &testPusherWriter{ResponseWriter: c.Writer}
+		bwWithPusher := newBufferedWriter(wrapped, 0)
+		assert.NotNil(t, bwWithPusher.Pusher())
+	})
+
+	t.Run("copyHeaders copies buffered headers to real writer", func(t *testing.T) {
+		c, w := TestContext(http.MethodGet, "/copy-headers", nil)
+		bw := newBufferedWriter(c.Writer, 0)
+		bw.Header().Set("X-Custom", "value")
+		bw.Header().Set("X-Another", "data")
+		bw.copyHeaders()
+		assert.Equal(t, "value", w.Header().Get("X-Custom"))
+		assert.Equal(t, "data", w.Header().Get("X-Another"))
 	})
 }

@@ -293,13 +293,15 @@ ginx.CORS(
 
 ### Auth (JWT)
 
-JWT authentication middleware with flexible token extraction and comprehensive context integration.
+JWT authentication middleware with secure-by-default token extraction and comprehensive context integration.
 
 **Usage:**
-- `Auth(jwtService jwt.Service)` - JWT authentication middleware
+- `Auth(jwtService jwt.Service, options ...Option[AuthConfig])` - JWT authentication middleware
+- `WithAuthQueryToken(true)` - Explicitly enable `?token=` query fallback (disabled by default)
 
 **Features:**
-- **Flexible token extraction**: Supports both `Authorization: Bearer <token>` header and `?token=<token>` query parameter
+- **Secure default token extraction**: Uses `Authorization: Bearer <token>` by default
+- **Optional query fallback**: `?token=<token>` is only enabled with `WithAuthQueryToken(true)`
 - **Automatic context population**: Sets user ID, roles, and token metadata in gin context
 - **Type-safe context keys**: Uses typed context keys to prevent conflicts
 - **Validation & parsing**: Uses `jwtService.ValidateAndParse()` for comprehensive token validation
@@ -374,19 +376,26 @@ HTTP-compliant response caching middleware with intelligent cache control and gr
 **Usage:**
 - `Cache(cache shardedcache.CacheInterface)` - Cache all cacheable responses (default group)
 - `CacheWithGroup(cache shardedcache.CacheInterface, groupName string)` - Cache with group prefix for isolation
+- `CacheWithOptions(cache shardedcache.CacheInterface, opts ...CacheOption)` - Cache with custom options (default group)
+- `CacheWithGroupOptions(cache shardedcache.CacheInterface, groupName string, opts ...CacheOption)` - Grouped cache with custom options
 
 **Features:**
 - **HTTP-compliant caching**: Respects `Cache-Control: no-store/private` directives
 - **Smart exclusions**: Automatically excludes responses with `Set-Cookie` headers to prevent user data leakage
+- **Auth-safe default**: Skips caching when request contains `Authorization` header
 - **2xx-only caching**: Only caches successful responses (200-299 status codes)
-- **Efficient cache keys**: Generated from HTTP method, path, and query parameters (`METHOD|PATH?QUERY`)
-- **Response reconstruction**: Preserves status code and body, and restores primary headers (multi-value headers are stored as the first value; responses with `Set-Cookie` are not cached)
+- **Safer default cache keys**: Generated from HTTP method + host + path + query (`METHOD|HOST|PATH?QUERY`)
+- **Content negotiation safety**: Default keys include `Accept-Encoding` variant when present to avoid representation mix-ups
+- **Configurable key strategy**: `WithCacheKeyFunc(func(*gin.Context) string)` supports custom variant/context dimensions
+- **Configurable vary dimensions**: `WithCacheVaryHeaders(headers...)` extends/overrides header dimensions used by default key generation
+- **Response reconstruction**: Preserves status code/body and replays full response headers including multi-value headers (`Link`, `Vary`, etc.); responses with `Set-Cookie` are not cached
 - **Group isolation**: Optional grouping for cache namespace separation
 
 **Cache key format:**
 ```
-GET|/api/users                    // No query parameters
-POST|/api/search?q=test&limit=10  // With query parameters
+GET|api.example.com|/api/users                    // No query parameters
+POST|api.example.com|/api/search?q=test&limit=10  // With query parameters
+GET|api.example.com|/api/users|h:Accept-Encoding=gzip // Content-encoding variant
 ```
 
 **Example:**
@@ -426,9 +435,14 @@ Smooth rate limiting using token bucket algorithm for requests per second.
 
 **Key generation options:**
 - `WithIP()` - IP-based rate limiting (default behavior)
-- `WithUser()` - Per-user rate limiting (requires user context)
+- `WithUser()` - Per-user rate limiting using authenticated context (`user_id`)
+- `WithTrustedUserHeader(name)` - Optional trusted header fallback for gateway-injected identity
 - `WithPath()` - Per-path rate limiting (different limits per endpoint)
 - `WithKeyFunc(keyFunc func(*gin.Context) string)` - Custom key generation function
+
+Security note:
+- `WithUser()` does not trust client-provided headers.
+- Use `WithTrustedUserHeader(name)` only when the header is set by trusted infrastructure (API gateway/auth proxy) and cannot be spoofed by clients.
 
 **Control options:**
 - `WithSkipFunc(skipFunc func(*gin.Context) bool)` - Skip certain requests
@@ -654,8 +668,8 @@ func main() {
         // Admin area protection
         When(isAdminPath, 
             ginx.RequirePermission(rbacService, "admin", "access")).
-        // Cache GET API responses (authenticated users only)
-        When(ginx.And(ginx.MethodIs("GET"), isAPIPath, ginx.IsAuthenticated()),
+        // Cache only public GET API responses (requests with Authorization are skipped by default)
+        When(ginx.And(ginx.MethodIs("GET"), isAPIPath, ginx.Not(ginx.IsAuthenticated())),
             ginx.Cache(cache)).
         Build())
         
@@ -892,8 +906,8 @@ func getUserDailyLimits(key string) int {
 ## Dependencies
 
 **Core dependencies:**
-- `github.com/gin-gonic/gin` v1.10.1 - Web framework
-- `golang.org/x/time` v0.13.0 - Rate limiting implementation
+- `github.com/gin-gonic/gin` v1.11.0 - Web framework
+- `golang.org/x/time` v0.14.0 - Rate limiting implementation
 
 **Optional feature dependencies:**
 - `github.com/simp-lee/jwt` - JWT authentication (for Auth middleware)

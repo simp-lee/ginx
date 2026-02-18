@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -10,11 +12,32 @@ import (
 	"github.com/simp-lee/rbac"
 )
 
+const (
+	envJWTSecret     = "GINX_DEMO_JWT_SECRET"
+	envAdminPassword = "GINX_DEMO_ADMIN_PASSWORD"
+	envUserPassword  = "GINX_DEMO_USER_PASSWORD"
+)
+
+type demoCredentials struct {
+	jwtSecret     string
+	adminPassword string
+	userPassword  string
+}
+
 func main() {
+	// 运行前请先设置环境变量（PowerShell 示例）:
+	// $env:GINX_DEMO_JWT_SECRET="replace-with-strong-secret"
+	// $env:GINX_DEMO_ADMIN_PASSWORD="replace-with-admin-password"
+	// $env:GINX_DEMO_USER_PASSWORD="replace-with-user-password"
+	creds, err := loadDemoCredentialsFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	r := gin.Default()
 
 	// 创建JWT服务
-	jwtService, err := jwt.New("your-super-secret-key-here",
+	jwtService, err := jwt.New(creds.jwtSecret,
 		jwt.WithLeeway(5*time.Minute),
 		jwt.WithIssuer("ginx-app"),
 		jwt.WithMaxTokenLifetime(24*time.Hour),
@@ -57,7 +80,7 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
-	r.POST("/api/login", loginHandler(jwtService))
+	r.POST("/api/login", loginHandler(jwtService, creds))
 	r.POST("/api/refresh", refreshHandler(jwtService))
 
 	// 需要认证的用户端点
@@ -81,8 +104,42 @@ func main() {
 	r.Run(":8080")
 }
 
+func loadDemoCredentialsFromEnv() (demoCredentials, error) {
+	jwtSecret, err := mustReadDemoEnv(envJWTSecret)
+	if err != nil {
+		return demoCredentials{}, err
+	}
+	adminPassword, err := mustReadDemoEnv(envAdminPassword)
+	if err != nil {
+		return demoCredentials{}, err
+	}
+	userPassword, err := mustReadDemoEnv(envUserPassword)
+	if err != nil {
+		return demoCredentials{}, err
+	}
+
+	return demoCredentials{
+		jwtSecret:     jwtSecret,
+		adminPassword: adminPassword,
+		userPassword:  userPassword,
+	}, nil
+}
+
+func mustReadDemoEnv(name string) (string, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return "", fmt.Errorf("missing required env %s. Set demo credentials before starting the example", name)
+	}
+
+	if value == "changeme" || value == "your-super-secret-key-here" || value == "admin123" || value == "user123" {
+		return "", fmt.Errorf("insecure value for env %s. Use a non-default credential", name)
+	}
+
+	return value, nil
+}
+
 // 登录处理器
-func loginHandler(jwtService jwt.Service) gin.HandlerFunc {
+func loginHandler(jwtService jwt.Service, creds demoCredentials) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
 			Username string `json:"username"`
@@ -100,14 +157,14 @@ func loginHandler(jwtService jwt.Service) gin.HandlerFunc {
 
 		switch req.Username {
 		case "admin":
-			if req.Password != "admin123" {
+			if req.Password != creds.adminPassword {
 				c.JSON(401, gin.H{"error": "invalid credentials"})
 				return
 			}
 			userID = "admin"
 			roles = []string{"admin"}
 		case "user":
-			if req.Password != "user123" {
+			if req.Password != creds.userPassword {
 				c.JSON(401, gin.H{"error": "invalid credentials"})
 				return
 			}

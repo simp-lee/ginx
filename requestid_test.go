@@ -1,6 +1,7 @@
 package ginx
 
 import (
+	"errors"
 	"net/http"
 	"regexp"
 	"sync"
@@ -223,4 +224,59 @@ func TestRequestID_Concurrency(t *testing.T) {
 	for e := range errs {
 		t.Errorf("concurrency error: %s", e)
 	}
+}
+
+func TestRequestID_DefaultGenerator_EntropyFailureFallbackIsNonConstantAndUnique(t *testing.T) {
+	original := requestIDRandRead
+	requestIDRandRead = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	t.Cleanup(func() {
+		requestIDRandRead = original
+	})
+
+	id1 := defaultRequestID()
+	id2 := defaultRequestID()
+
+	if id1 == "00000000000000000000000000000000" || id2 == "00000000000000000000000000000000" {
+		t.Fatal("fallback request id must not return the fixed zero constant")
+	}
+	if id1 == id2 {
+		t.Fatalf("fallback request ids should be unique, got identical values: %q", id1)
+	}
+	if !isHex32(id1) || !isHex32(id2) {
+		t.Fatalf("fallback request ids should remain 32-hex strings, got %q and %q", id1, id2)
+	}
+}
+
+func TestRequestID_CustomGenerator(t *testing.T) {
+	const customID = "custom-generated-id"
+	m := RequestID(WithRequestIDGenerator(func() string { return customID }))
+
+	next := func(c *gin.Context) {
+		c.Status(http.StatusOK)
+		c.Writer.WriteHeaderNow()
+	}
+
+	t.Run("uses custom generator when incoming missing", func(t *testing.T) {
+		c, w := TestContext("GET", "/api/test", nil)
+		m(next)(c)
+
+		if got := w.Header().Get("X-Request-ID"); got != customID {
+			t.Fatalf("expected custom request id %q, got %q", customID, got)
+		}
+		if got, ok := GetRequestID(c); !ok || got != customID {
+			t.Fatalf("expected context request id %q, got %q (ok=%v)", customID, got, ok)
+		}
+	})
+
+	t.Run("still respects incoming by default", func(t *testing.T) {
+		const incomingID = "incoming-id"
+		c, w := TestContext("GET", "/api/test", map[string]string{"X-Request-ID": incomingID})
+		m(next)(c)
+
+		if got := w.Header().Get("X-Request-ID"); got != incomingID {
+			t.Fatalf("expected incoming request id %q, got %q", incomingID, got)
+		}
+	})
 }

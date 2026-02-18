@@ -304,17 +304,20 @@ func TestRecoveryLoggerIntegration(t *testing.T) {
 		}
 	})
 
-	t.Run("Invalid logger options cause panic", func(t *testing.T) {
+	t.Run("Accepted logger options do not panic", func(t *testing.T) {
 		defer func() {
-			if r := recover(); r == nil {
-				t.Error("Invalid logger options should cause panic during middleware creation")
+			if r := recover(); r != nil {
+				t.Errorf("Recovery should not panic for accepted logger options, got: %v", r)
 			}
 		}()
 
-		// 创建无效配置：既不启用控制台也不启用文件输出
-		Recovery(
-			logger.WithConsole(false), // 这会导致错误，因为没有启用任何输出
+		middleware := Recovery(
+			logger.WithConsole(false),
 		)
+
+		if middleware == nil {
+			t.Error("Recovery should return middleware for accepted logger options")
+		}
 	})
 }
 

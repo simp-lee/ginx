@@ -98,7 +98,7 @@ func setupBasicRateLimit(r *gin.Engine) {
 	basic.GET("/per-user",
 		extractUserID(), // Middleware to extract user_id from query
 		ginx.RateLimit(3, 6, ginx.WithUser())(func(c *gin.Context) {
-			userID, _ := c.Get("user_id")
+			userID, _ := ginx.GetUserID(c)
 			c.JSON(http.StatusOK, gin.H{
 				"message": "Per-user rate limit: 3 rps, burst 6",
 				"user_id": userID,
@@ -184,8 +184,8 @@ func setupDynamicRateLimit(r *gin.Engine) {
 				}
 				return 10, 20 // Regular users
 			}))(func(c *gin.Context) {
-			userID, _ := c.Get("user_id")
-			isPremium := isPremiumUser(userID.(string))
+			userID, _ := ginx.GetUserID(c)
+			isPremium := isPremiumUser(userID)
 
 			limits := "10 rps, 20 burst"
 			if isPremium {
@@ -225,8 +225,7 @@ func setupDynamicRateLimit(r *gin.Engine) {
 				}
 				return 5, 10 // Free tier
 			}))(func(c *gin.Context) {
-			userID, _ := c.Get("user_id")
-			userIDStr := userID.(string)
+			userIDStr, _ := ginx.GetUserID(c)
 
 			var limits, userType string
 			if len(userIDStr) > 0 {
@@ -488,7 +487,7 @@ func extractUserID() gin.HandlerFunc {
 		if userID == "" {
 			userID = "anonymous"
 		}
-		c.Set("user_id", userID)
+		ginx.SetUserID(c, userID)
 		c.Next()
 	}
 }

@@ -11,6 +11,40 @@ import (
 )
 
 func main() {
+	r := newRouter()
+
+	// Start server
+	fmt.Println("🚀 Cache Example Server starting on :8080")
+	fmt.Println("\n📋 Available Endpoints:")
+	fmt.Println("  Basic Caching:")
+	fmt.Println("    GET  /basic/all        - Cached (cache middleware applies to GET/HEAD only)")
+	fmt.Println("    POST /basic/all        - Not cached")
+	fmt.Println("    GET  /basic/get-only   - Cache only GET requests")
+	fmt.Println("    POST /basic/get-only   - POST request (not cached)")
+	fmt.Println("    GET  /basic/grouped    - Cache with groups")
+	fmt.Println("\n  Conditional Caching:")
+	fmt.Println("    GET  /api/users       - Cache API GET requests")
+	fmt.Println("    POST /api/users       - API POST (not cached)")
+	fmt.Println("    GET  /api/health      - Health check (excluded from cache)")
+	fmt.Println("    GET  /public/data     - Public data (always cached)")
+	fmt.Println("    GET  /admin/secret    - Admin data (never cached)")
+	fmt.Println("\n  Advanced Features:")
+	fmt.Println("    GET  /advanced/query?param=value  - Query parameter caching")
+	fmt.Println("    GET  /advanced/headers             - Header-based caching")
+	fmt.Println("    GET  /advanced/complex             - Complex conditions")
+	fmt.Println("\n  Cache Management:")
+	fmt.Println("    GET    /cache/stats    - Cache statistics")
+	fmt.Println("    DELETE /cache/clear    - Clear all cache")
+	fmt.Println("    DELETE /cache/group/:name - Clear cache group")
+	fmt.Println("\n💡 Try making requests to see caching in action!")
+	fmt.Println("💡 Check response headers for cache hit indicators")
+
+	if err := r.Run(":8080"); err != nil {
+		log.Fatal("Failed to start server:", err)
+	}
+}
+
+func newRouter() *gin.Engine {
 	// Set Gin to release mode for cleaner output
 	gin.SetMode(gin.ReleaseMode)
 
@@ -37,40 +71,12 @@ func main() {
 	setupAdvancedCaching(r, cache)
 	setupCacheManagement(r, cache)
 
-	// Start server
-	fmt.Println("🚀 Cache Example Server starting on :8080")
-	fmt.Println("\n📋 Available Endpoints:")
-	fmt.Println("  Basic Caching:")
-	fmt.Println("    GET  /basic/all        - Cache all responses")
-	fmt.Println("    POST /basic/all        - POST also cached")
-	fmt.Println("    GET  /basic/get-only   - Cache only GET requests")
-	fmt.Println("    POST /basic/get-only   - POST request (not cached)")
-	fmt.Println("    GET  /basic/grouped    - Cache with groups")
-	fmt.Println("\n  Conditional Caching:")
-	fmt.Println("    GET  /api/users       - Cache API GET requests")
-	fmt.Println("    POST /api/users       - API POST (not cached)")
-	fmt.Println("    GET  /api/health      - Health check (excluded from cache)")
-	fmt.Println("    GET  /public/data     - Public data (always cached)")
-	fmt.Println("    GET  /admin/secret    - Admin data (never cached)")
-	fmt.Println("\n  Advanced Features:")
-	fmt.Println("    GET  /advanced/query?param=value  - Query parameter caching")
-	fmt.Println("    GET  /advanced/headers             - Header-based caching")
-	fmt.Println("    GET  /advanced/complex             - Complex conditions")
-	fmt.Println("\n  Cache Management:")
-	fmt.Println("    GET    /cache/stats    - Cache statistics")
-	fmt.Println("    DELETE /cache/clear    - Clear all cache")
-	fmt.Println("    DELETE /cache/group/:name - Clear cache group")
-	fmt.Println("\n💡 Try making requests to see caching in action!")
-	fmt.Println("💡 Check response headers for cache hit indicators")
-
-	if err := r.Run(":8080"); err != nil {
-		log.Fatal("Failed to start server:", err)
-	}
+	return r
 }
 
-// setupBasicCaching demonstrates basic caching patterns
+// setupBasicCaching demonstrates basic caching patterns (cache middleware only caches GET/HEAD)
 func setupBasicCaching(r *gin.Engine, cache shardedcache.CacheInterface) {
-	// 1. Cache all responses regardless of method
+	// 1. Apply cache middleware to a route group (effective for GET/HEAD only)
 	allGroup := r.Group("/basic/all")
 	allGroup.Use(ginx.NewChain().
 		Use(ginx.Cache(cache)).
@@ -80,18 +86,18 @@ func setupBasicCaching(r *gin.Engine, cache shardedcache.CacheInterface) {
 		// Simulate some processing time
 		time.Sleep(100 * time.Millisecond)
 		c.JSON(200, gin.H{
-			"message":   "All responses are cached",
+			"message":   "GET response is cached",
 			"timestamp": time.Now().Unix(),
-			"info":      "This response is cached regardless of method",
+			"info":      "Cache middleware caches GET/HEAD responses",
 		})
 	})
 
 	allGroup.POST("", func(c *gin.Context) {
 		time.Sleep(100 * time.Millisecond)
 		c.JSON(200, gin.H{
-			"message":   "POST response is also cached",
+			"message":   "POST response is not cached",
 			"timestamp": time.Now().Unix(),
-			"info":      "Even POST requests are cached in this endpoint",
+			"info":      "Cache middleware does not cache POST requests",
 		})
 	})
 
@@ -194,7 +200,7 @@ func setupConditionalCaching(r *gin.Engine, cache shardedcache.CacheInterface) {
 		c.JSON(200, gin.H{
 			"message":   "Feedback received",
 			"timestamp": time.Now().Unix(),
-			"cached":    "Even POST to public endpoints are cached",
+			"cached":    "POST requests are not cached",
 		})
 	})
 

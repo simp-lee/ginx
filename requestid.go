@@ -2,12 +2,24 @@ package ginx
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+// requestIDRandRead is a package-level variable to allow test injection of a failing
+// rand.Read implementation. It is only mutated in tests (never in production code).
+// Test files that reassign this variable must not run in parallel with other tests
+// that depend on request ID generation.
+var requestIDRandRead = rand.Read
+
+// requestIDFallbackCounter is atomically incremented as a fallback when crypto/rand fails.
+var requestIDFallbackCounter uint64
 
 // RequestIDConfig holds configuration for the RequestID middleware
 type RequestIDConfig struct {
@@ -81,13 +93,8 @@ func RequestID(opts ...RequestIDOption) Middleware {
 
 			// Also expose header for browsers when used with CORS
 			// (non-breaking; if not using CORS it's harmless)
-			// Avoid duplication if user already sets Access-Control-Expose-Headers elsewhere
-			const exposeKey = "Access-Control-Expose-Headers"
-			if existing := c.Writer.Header().Get(exposeKey); existing == "" {
-				c.Writer.Header().Set(exposeKey, cfg.Header)
-			} else if !headerValueContains(existing, cfg.Header) {
-				c.Writer.Header().Set(exposeKey, existing+", "+cfg.Header)
-			}
+			// Uses the shared addExposeHeaders helper from cors.go for deduplication
+			addExposeHeaders(c, cfg.Header)
 
 			next(c)
 		}
@@ -96,40 +103,11 @@ func RequestID(opts ...RequestIDOption) Middleware {
 
 func defaultRequestID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// Fallback: use non-crypto random from request address/time is avoided to reduce deps; return short static when entropy fails
-		return "00000000000000000000000000000000"
+	if _, err := requestIDRandRead(b[:]); err != nil {
+		binary.BigEndian.PutUint64(b[0:8], uint64(time.Now().UnixNano()))
+		binary.BigEndian.PutUint64(b[8:16], atomic.AddUint64(&requestIDFallbackCounter, 1))
 	}
 	return hex.EncodeToString(b[:])
-}
-
-// headerValueContains checks if a comma-separated header list contains a value (case-sensitive, simple check)
-func headerValueContains(list, value string) bool {
-	// Cheap parse without allocations for most small lists
-	// Compare case-insensitively as header field-names are case-insensitive per RFC 7230
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return false
-	}
-	start := 0
-	for i := 0; i <= len(list); i++ {
-		if i == len(list) || list[i] == ',' {
-			// trim spaces
-			j := start
-			for j < i && list[j] == ' ' {
-				j++
-			}
-			k := i
-			for k > j && list[k-1] == ' ' {
-				k--
-			}
-			if j < k && strings.EqualFold(list[j:k], value) {
-				return true
-			}
-			start = i + 1
-		}
-	}
-	return false
 }
 
 // Convenience condition: HasRequestID checks presence of request id in context

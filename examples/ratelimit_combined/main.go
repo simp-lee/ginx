@@ -9,6 +9,38 @@ import (
 )
 
 func main() {
+	r := newRouter()
+
+	// Cleanup resources
+	defer func() {
+		fmt.Println("\nCleaning up rate limiters...")
+		ginx.CleanupRateLimiters()
+	}()
+
+	fmt.Println("=== Combined Rate Limiting Example Server ===")
+	fmt.Println("")
+	fmt.Println("✨ Features:")
+	fmt.Println("  - RPS rate limiting (requests per second)")
+	fmt.Println("  - Time-window rate limiting (per minute/hour/day)")
+	fmt.Println("  - Multi-layer combined rate limiting")
+	fmt.Println("  - User tier-based rate limiting")
+	fmt.Println("")
+	fmt.Println("🚀 Server running at: http://localhost:8080")
+	fmt.Println("")
+	fmt.Println("📖 Visit http://localhost:8080/ for complete documentation")
+	fmt.Println("")
+	fmt.Println("🧪 Test examples:")
+	fmt.Println("  curl http://localhost:8080/api/example1/data")
+	fmt.Println("  curl http://localhost:8080/api/example2/premium")
+	fmt.Println("  curl http://localhost:8080/v3/users")
+	fmt.Println("")
+
+	if err := r.Run(":8080"); err != nil {
+		fmt.Printf("❌ Server failed to start: %v\n", err)
+	}
+}
+
+func newRouter() *gin.Engine {
 	r := gin.Default()
 
 	// ============================================================================
@@ -235,31 +267,5 @@ func main() {
 		})
 	})
 
-	// Cleanup resources
-	defer func() {
-		fmt.Println("\nCleaning up rate limiters...")
-		ginx.CleanupRateLimiters()
-	}()
-
-	fmt.Println("=== Combined Rate Limiting Example Server ===")
-	fmt.Println("")
-	fmt.Println("✨ Features:")
-	fmt.Println("  - RPS rate limiting (requests per second)")
-	fmt.Println("  - Time-window rate limiting (per minute/hour/day)")
-	fmt.Println("  - Multi-layer combined rate limiting")
-	fmt.Println("  - User tier-based rate limiting")
-	fmt.Println("")
-	fmt.Println("🚀 Server running at: http://localhost:8080")
-	fmt.Println("")
-	fmt.Println("📖 Visit http://localhost:8080/ for complete documentation")
-	fmt.Println("")
-	fmt.Println("🧪 Test examples:")
-	fmt.Println("  curl http://localhost:8080/api/example1/data")
-	fmt.Println("  curl http://localhost:8080/api/example2/premium")
-	fmt.Println("  curl http://localhost:8080/v3/users")
-	fmt.Println("")
-
-	if err := r.Run(":8080"); err != nil {
-		fmt.Printf("❌ Server failed to start: %v\n", err)
-	}
+	return r
 }

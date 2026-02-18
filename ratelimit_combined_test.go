@@ -15,8 +15,7 @@ func TestCombinedRateLimiting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("RPS_and_PerMinute_Combined", func(t *testing.T) {
-		// Clean up previous rate limiters
-		CleanupRateLimiters()
+		SetupRateLimitTest(t)
 
 		r := gin.New()
 
@@ -49,8 +48,7 @@ func TestCombinedRateLimiting(t *testing.T) {
 	})
 
 	t.Run("RPS_Burst_Blocks_Before_Window", func(t *testing.T) {
-		// Clean up previous rate limiters
-		CleanupRateLimiters()
+		SetupRateLimitTest(t)
 
 		r := gin.New()
 
@@ -81,8 +79,7 @@ func TestCombinedRateLimiting(t *testing.T) {
 	})
 
 	t.Run("Three_Layer_Protection", func(t *testing.T) {
-		// Clean up previous rate limiters
-		CleanupRateLimiters()
+		SetupRateLimitTest(t)
 
 		r := gin.New()
 
@@ -114,8 +111,7 @@ func TestCombinedRateLimiting(t *testing.T) {
 	})
 
 	t.Run("Headers_From_Combined_Limiters", func(t *testing.T) {
-		// Clean up previous rate limiters
-		CleanupRateLimiters()
+		SetupRateLimitTest(t)
 
 		r := gin.New()
 
@@ -145,10 +141,15 @@ func TestCombinedRateLimiting(t *testing.T) {
 	})
 
 	t.Run("Different_Keys_Independent", func(t *testing.T) {
-		// Clean up previous rate limiters
-		CleanupRateLimiters()
+		SetupRateLimitTest(t)
 
 		r := gin.New()
+		r.Use(func(c *gin.Context) {
+			if userID := c.GetHeader("X-Auth-User"); userID != "" {
+				SetUserID(c, userID)
+			}
+			c.Next()
+		})
 
 		// Use WithUser option, different users have independent counters
 		r.Use(NewChain().
@@ -163,7 +164,7 @@ func TestCombinedRateLimiting(t *testing.T) {
 		// User 1 sends 2 requests
 		for i := 1; i <= 2; i++ {
 			req := httptest.NewRequest("GET", "/test", nil)
-			req.Header.Set("X-User-ID", "user1")
+			req.Header.Set("X-Auth-User", "user1")
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
 			assert.Equal(t, http.StatusOK, w.Code, "User 1's request %d should succeed", i)
@@ -173,7 +174,7 @@ func TestCombinedRateLimiting(t *testing.T) {
 		// User 2 can also send 2 requests (independent counter)
 		for i := 1; i <= 2; i++ {
 			req := httptest.NewRequest("GET", "/test", nil)
-			req.Header.Set("X-User-ID", "user2")
+			req.Header.Set("X-Auth-User", "user2")
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
 			assert.Equal(t, http.StatusOK, w.Code, "User 2's request %d should succeed (independent counter)", i)
@@ -182,7 +183,7 @@ func TestCombinedRateLimiting(t *testing.T) {
 
 		// User 1's 3rd request should be blocked (exceeding 2 requests per minute limit)
 		req := httptest.NewRequest("GET", "/test", nil)
-		req.Header.Set("X-User-ID", "user1")
+		req.Header.Set("X-Auth-User", "user1")
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusTooManyRequests, w.Code, "User 1's 3rd request should be blocked")

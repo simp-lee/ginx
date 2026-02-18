@@ -9,6 +9,19 @@ import (
 )
 
 func main() {
+	r := newRouter()
+
+	log.Println("服务器启动在 :8080")
+	log.Println("测试 URL:")
+	log.Println("  http://localhost:8080/fast (预期超时)")
+	log.Println("  http://localhost:8080/slow (预期超时)")
+	log.Println("  http://localhost:8080/check-timeout (预期超时)")
+	log.Println("  http://localhost:8080/api/heavy/process (预期超时)")
+
+	r.Run(":8080")
+}
+
+func newRouter() *gin.Engine {
 	r := gin.New()
 
 	// 添加日志中间件来展示 IsTimeout helper 的用法
@@ -85,12 +98,5 @@ func main() {
 		})
 	})
 
-	log.Println("服务器启动在 :8080")
-	log.Println("测试 URL:")
-	log.Println("  http://localhost:8080/fast (预期超时)")
-	log.Println("  http://localhost:8080/slow (预期超时)")
-	log.Println("  http://localhost:8080/check-timeout (预期超时)")
-	log.Println("  http://localhost:8080/api/heavy/process (预期超时)")
-
-	r.Run(":8080")
+	return r
 }

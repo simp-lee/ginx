@@ -12,6 +12,24 @@ import (
 )
 
 func main() {
+	r := newRouter()
+
+	fmt.Println("🚀 服务器启动在 :8080")
+	fmt.Println("\n📋 测试路由：")
+	fmt.Println("  GET /fast       - 快速响应 (INFO 日志)")
+	fmt.Println("  GET /slow       - 超时响应 (INFO + WARN 双重日志)")
+	fmt.Println("  GET /maybe-slow - 接近超时边界")
+	fmt.Println("\n💡 架构亮点：")
+	fmt.Println("  - Logger 中间件负责所有请求的基础日志")
+	fmt.Println("  - Timeout 中间件专注于超时处理")
+	fmt.Println("  - OnTimeout 条件函数识别超时请求")
+	fmt.Println("  - Chain.When() 实现条件性日志增强")
+	fmt.Println("  - 职责分离，组合优于继承 🎯")
+
+	log.Fatal(http.ListenAndServe(":8080", r))
+}
+
+func newRouter() *gin.Engine {
 	gin.SetMode(gin.DebugMode)
 
 	r := gin.New()
@@ -59,17 +77,5 @@ func main() {
 		c.JSON(200, gin.H{"message": "可能慢的响应"})
 	})
 
-	fmt.Println("🚀 服务器启动在 :8080")
-	fmt.Println("\n📋 测试路由：")
-	fmt.Println("  GET /fast       - 快速响应 (INFO 日志)")
-	fmt.Println("  GET /slow       - 超时响应 (INFO + WARN 双重日志)")
-	fmt.Println("  GET /maybe-slow - 接近超时边界")
-	fmt.Println("\n💡 架构亮点：")
-	fmt.Println("  - Logger 中间件负责所有请求的基础日志")
-	fmt.Println("  - Timeout 中间件专注于超时处理")
-	fmt.Println("  - OnTimeout 条件函数识别超时请求")
-	fmt.Println("  - Chain.When() 实现条件性日志增强")
-	fmt.Println("  - 职责分离，组合优于继承 🎯")
-
-	log.Fatal(http.ListenAndServe(":8080", r))
+	return r
 }

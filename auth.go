@@ -7,6 +7,25 @@ import (
 	"github.com/simp-lee/jwt"
 )
 
+// AuthConfig configures JWT auth token extraction behavior.
+type AuthConfig struct {
+	AllowQueryToken bool `json:"allow_query_token"`
+}
+
+func defaultAuthConfig() *AuthConfig {
+	return &AuthConfig{
+		AllowQueryToken: false,
+	}
+}
+
+// WithAuthQueryToken controls whether query token fallback is allowed.
+// Disabled by default for credential leakage prevention.
+func WithAuthQueryToken(allow bool) Option[AuthConfig] {
+	return func(c *AuthConfig) {
+		c.AllowQueryToken = allow
+	}
+}
+
 // ============================================================================
 // Middleware - JWT Authentication
 // ============================================================================
@@ -28,11 +47,20 @@ import (
 // }
 
 // Auth is JWT authentication middleware.
-func Auth(jwtService jwt.Service) Middleware {
+func Auth(jwtService jwt.Service, options ...Option[AuthConfig]) Middleware {
+	if jwtService == nil {
+		panic("auth middleware requires non-nil jwt service")
+	}
+
+	config := defaultAuthConfig()
+	for _, option := range options {
+		option(config)
+	}
+
 	return func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
-			// Get token from Authorization header or query parameter
-			tokenString := extractToken(c)
+			// Get token from Authorization header (or query parameter when explicitly enabled)
+			tokenString := extractTokenWithConfig(c, config.AllowQueryToken)
 			if tokenString == "" {
 				c.AbortWithStatusJSON(401, gin.H{"error": "missing token"})
 				return
@@ -57,16 +85,33 @@ func Auth(jwtService jwt.Service) Middleware {
 	}
 }
 
-// extractToken extracts the JWT token from the Authorization header or query parameter.
+// extractToken extracts the JWT token from the Authorization header.
+// Query parameter fallback is disabled by default.
 func extractToken(c *gin.Context) string {
+	return extractTokenWithConfig(c, false)
+}
+
+// extractTokenWithConfig extracts token with configurable query fallback behavior.
+// When the Authorization header is present but not in Bearer format (e.g., "Basic ..."),
+// this intentionally returns an empty string. The calling middleware then responds with
+// "missing token" (401), which is the correct behavior — the endpoint requires Bearer
+// auth, so a non-Bearer scheme is equivalent to no valid token being provided.
+func extractTokenWithConfig(c *gin.Context, allowQueryToken bool) string {
 	header := c.GetHeader("Authorization")
-	if header != "" && strings.HasPrefix(header, "Bearer ") {
-		return strings.TrimPrefix(header, "Bearer ")
+	if header != "" {
+		parts := strings.SplitN(strings.TrimSpace(header), " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			token := strings.TrimSpace(parts[1])
+			if token != "" {
+				return token
+			}
+		}
 	}
 
-	// Fallback to query parameter
-	if token := c.Query("token"); token != "" {
-		return token
+	if allowQueryToken {
+		if token := c.Query("token"); token != "" {
+			return token
+		}
 	}
 
 	return ""

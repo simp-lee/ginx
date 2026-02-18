@@ -66,7 +66,10 @@ func PathHasSuffix(suffix string) Condition {
 	}
 }
 
-// PathMatches checks if the path matches the specified regex pattern
+// PathMatches checks if the path matches the specified regex pattern.
+// It panics if the pattern is not a valid regular expression. This follows the library's
+// convention of catching configuration errors at init time (like regexp.MustCompile)
+// rather than silently producing always-false conditions at request time.
 func PathMatches(pattern string) Condition {
 	re := regexp.MustCompile(pattern)
 	return func(c *gin.Context) bool {

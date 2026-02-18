@@ -314,6 +314,46 @@ func TestRequirePermission(t *testing.T) {
 	})
 }
 
+func TestRBACMiddleware_NilServicePanics(t *testing.T) {
+	t.Run("RequirePermission should panic when service is nil", func(t *testing.T) {
+		assert.PanicsWithValue(t, "rbac middleware requires non-nil service", func() {
+			RequirePermission(nil, "posts", "read")
+		})
+	})
+
+	t.Run("RequireRolePermission should panic when service is nil", func(t *testing.T) {
+		assert.PanicsWithValue(t, "rbac middleware requires non-nil service", func() {
+			RequireRolePermission(nil, "posts", "read")
+		})
+	})
+
+	t.Run("RequireUserPermission should panic when service is nil", func(t *testing.T) {
+		assert.PanicsWithValue(t, "rbac middleware requires non-nil service", func() {
+			RequireUserPermission(nil, "posts", "read")
+		})
+	})
+}
+
+func TestRBACCondition_NilServicePanics(t *testing.T) {
+	t.Run("HasPermission should panic when service is nil", func(t *testing.T) {
+		assert.PanicsWithValue(t, "rbac condition requires non-nil service", func() {
+			HasPermission(nil, "posts", "read")
+		})
+	})
+
+	t.Run("HasRolePermission should panic when service is nil", func(t *testing.T) {
+		assert.PanicsWithValue(t, "rbac condition requires non-nil service", func() {
+			HasRolePermission(nil, "posts", "read")
+		})
+	})
+
+	t.Run("HasUserPermission should panic when service is nil", func(t *testing.T) {
+		assert.PanicsWithValue(t, "rbac condition requires non-nil service", func() {
+			HasUserPermission(nil, "posts", "read")
+		})
+	})
+}
+
 func TestRequireRolePermission(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

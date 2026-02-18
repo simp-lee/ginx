@@ -1,219 +1,24 @@
 package ginx
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
-	"net"
+	"fmt"
 	"net/http"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
-// bufferedWriter buffers response content before timeout occurs
-type bufferedWriter struct {
-	gin.ResponseWriter
-	body       *bytes.Buffer
-	headers    http.Header
-	statusCode int
-	statusSet  bool
-	mutex      sync.RWMutex
-	timedOut   atomic.Bool
-	written    bool
-}
-
-func newBufferedWriter(w gin.ResponseWriter) *bufferedWriter {
-	return &bufferedWriter{
-		ResponseWriter: w,
-		body:           &bytes.Buffer{},
-		headers:        make(http.Header),
-		statusCode:     200,
-		statusSet:      false,
-	}
-}
-
-func (w *bufferedWriter) Write(data []byte) (int, error) {
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-
-	if w.timedOut.Load() {
-		// If already timed out, ignore the write
-		return len(data), nil
-	}
-
-	return w.body.Write(data)
-}
-
-func (w *bufferedWriter) WriteHeader(statusCode int) {
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-
-	if w.timedOut.Load() || w.written {
-		return
-	}
-
-	w.statusCode = statusCode
-	w.statusSet = true
-}
-
-func (w *bufferedWriter) Header() http.Header {
-	// Fully buffered header: always return buffered headers until flushToReal copies them uniformly
-	return w.headers
-}
-
-func (w *bufferedWriter) WriteHeaderNow() {
-	// In buffered mode, writing real response early would break subsequent timeout
-	// judgment and consistency, so treat this as no-op. Only flushToReal writes
-	// out uniformly at the final stage. This prevents early response even if
-	// business code explicitly calls WriteHeaderNow.
-}
-
-func (w *bufferedWriter) Size() int {
-	w.mutex.RLock()
-	defer w.mutex.RUnlock()
-	return w.body.Len()
-}
-
-func (w *bufferedWriter) WriteString(s string) (int, error) {
-	return w.Write([]byte(s))
-}
-
-func (w *bufferedWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	// Use write lock to ensure mutual exclusion with other operations
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-
-	// Disallow Hijack after timeout to avoid inconsistent connection state
-	if w.timedOut.Load() {
-		return nil, nil, http.ErrNotSupported
-	}
-
-	if hijacker, ok := w.ResponseWriter.(http.Hijacker); ok {
-		// Safely attempt Hijack, capture potential panic
-		var conn net.Conn
-		var rw *bufio.ReadWriter
-		var err error
-
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// If underlying implementation panics (e.g., test environment), convert to error
-					err = http.ErrNotSupported
-				}
-			}()
-			conn, rw, err = hijacker.Hijack()
-		}()
-
-		// Only mark as written when Hijack succeeds
-		if err == nil {
-			w.written = true
-		}
-
-		return conn, rw, err
-	}
-	return nil, nil, http.ErrNotSupported
-}
-
-func (w *bufferedWriter) Flush() {
-	// Use write lock to ensure mutual exclusion with Hijack and other operations
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-
-	// Only execute downstream Flush after buffered content has been flushed to real ResponseWriter,
-	// avoiding race conditions caused by triggering underlying header/body sending during buffering stage.
-	if w.written {
-		if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-			flusher.Flush()
-		}
-	}
-}
-
-// markTimeout marks as timed out state, preventing subsequent writes
-func (w *bufferedWriter) markTimeout() {
-	w.timedOut.Store(true)
-}
-
-// copyHeaders copies buffered headers to the real ResponseWriter
-func (w *bufferedWriter) copyHeaders() {
-	dst := w.ResponseWriter.Header()
-	for key, values := range w.headers {
-		// Use overwrite copy semantics (keeping final result closer to direct writing)
-		// Create a copy of values to avoid sharing underlying array
-		cp := make([]string, len(values))
-		copy(cp, values)
-		dst[key] = cp
-	}
-}
-
-// flushToReal writes buffered content to the real ResponseWriter
-func (w *bufferedWriter) flushToReal() {
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-
-	if w.timedOut.Load() || w.written {
-		return
-	}
-
-	w.copyHeaders()
-	w.ResponseWriter.WriteHeader(w.statusCode)
-	if w.body.Len() > 0 {
-		w.ResponseWriter.Write(w.body.Bytes())
-	}
-	w.written = true
-}
-
-// adoptStatusFromOriginal syncs status code from the original writer when no explicit status was set.
-func (w *bufferedWriter) adoptStatusFromOriginal(original gin.ResponseWriter) {
-	if original == nil {
-		return
-	}
-
-	status := original.Status()
-	if status <= 0 {
-		return
-	}
-
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-
-	if w.timedOut.Load() || w.written || w.statusSet {
-		return
-	}
-
-	w.statusCode = status
-	w.statusSet = true
-}
-
-// Status returns the buffered status code, allowing middleware in the chain to read the correct status
-func (w *bufferedWriter) Status() int {
-	w.mutex.RLock()
-	defer w.mutex.RUnlock()
-	return w.statusCode
-}
-
-// Written returns the buffered write state, allowing middleware in the chain to read the correct write state
-func (w *bufferedWriter) Written() bool {
-	w.mutex.RLock()
-	defer w.mutex.RUnlock()
-	return w.written
-}
-
-// Pusher passes through HTTP/2 Server Push functionality (if underlying support exists)
-func (w *bufferedWriter) Pusher() http.Pusher {
-	if pusher, ok := w.ResponseWriter.(http.Pusher); ok {
-		return pusher
-	}
-	return nil
-}
-
 // TimeoutConfig timeout middleware configuration
 type TimeoutConfig struct {
 	Timeout  time.Duration `json:"timeout"`  // Timeout duration
 	Response any           `json:"response"` // Timeout response content
+	// MaxBufferSize limits the response buffer size in bytes (0 = unlimited).
+	// When a response exceeds this limit, it is flushed directly to the client,
+	// bypassing timeout protection for that request. This prevents memory exhaustion
+	// from very large response bodies while preserving timeout behavior for normal responses.
+	MaxBufferSize int `json:"max_buffer_size"`
 }
 
 // defaultTimeoutConfig returns default timeout configuration
@@ -251,20 +56,42 @@ func WithTimeoutMessage(message string) Option[TimeoutConfig] {
 	}
 }
 
-// writeTimeoutResponse writes timeout response
+// WithMaxBufferSize sets the maximum response buffer size in bytes.
+// When a handler writes a response larger than this limit, the buffered content
+// is flushed directly to the client, bypassing timeout protection for that request.
+// This prevents memory exhaustion from very large response bodies (e.g., file downloads
+// or large database dumps). A value of 0 (default) means unlimited buffering.
+func WithMaxBufferSize(size int) Option[TimeoutConfig] {
+	return func(c *TimeoutConfig) {
+		c.MaxBufferSize = size
+	}
+}
+
+// writeTimeoutResponse writes timeout response.
+// It acquires bufferedWriter.mutex to serialize against the handler goroutine's
+// buffer-overflow path (which writes directly to originalWriter under the same mutex).
+// If the handler has already flushed to the real writer (written == true), the timeout
+// response is skipped because the client is already receiving the handler's response.
 func writeTimeoutResponse(originalWriter gin.ResponseWriter, bufferedWriter *bufferedWriter, config *TimeoutConfig) {
-	// Mark bufferedWriter as timed out
+	bufferedWriter.mutex.Lock()
 	bufferedWriter.markTimeout()
 
-	// Copy buffered headers to preserve important headers (CORS, Trace-ID, etc.)
-	// This is now safe since we're in the same goroutine - no race condition
-	bufferedWriter.copyHeaders()
+	// If handler already flushed to real writer (buffer overflow or hijack),
+	// we've lost exclusive access to the response stream. Skip writing timeout response.
+	if bufferedWriter.written {
+		bufferedWriter.mutex.Unlock()
+		return
+	}
+	bufferedWriter.written = true
+	bufferedWriter.mutex.Unlock()
+
+	// Now safe: handler goroutine will see written=true && timedOut=true and won't
+	// attempt further writes to originalWriter.
+	clearTimeoutEntityHeaders(originalWriter.Header())
 
 	// Set timeout-specific headers (may override existing Content-Type)
 	originalWriter.Header().Set("Content-Type", "application/json; charset=utf-8")
 	originalWriter.Header().Set("X-Timeout", "true")
-	// Also set X-Timeout in bufferedWriter headers for IsTimeout function
-	bufferedWriter.Header().Set("X-Timeout", "true")
 	originalWriter.WriteHeader(http.StatusRequestTimeout)
 
 	// Serialize JSON response directly from config or use default
@@ -280,24 +107,56 @@ func writeTimeoutResponse(originalWriter gin.ResponseWriter, bufferedWriter *buf
 	} else {
 		jsonBytes = []byte(`{"code":408,"error":"request timeout"}`)
 	}
-	originalWriter.Write(jsonBytes)
+	if _, err := originalWriter.Write(jsonBytes); err != nil {
+		_, _ = fmt.Fprintf(gin.DefaultErrorWriter, "[ginx][timeout] failed to write timeout response: %v\n", err)
+	}
 
-	// Update buffered writer's visible state for downstream middleware
-	// (such as logging) in the chain to read correct status code and response size
-	// Since we're serial now, we can safely access without excessive locking
 	bufferedWriter.mutex.Lock()
 	bufferedWriter.statusCode = http.StatusRequestTimeout
 	bufferedWriter.statusSet = true
-	bufferedWriter.written = true
-	// Clear and replace buffer with actual timeout response to ensure Size() accuracy
 	bufferedWriter.body.Reset()
 	bufferedWriter.body.Write(jsonBytes)
 	bufferedWriter.mutex.Unlock()
+}
 
+func clearTimeoutEntityHeaders(headers http.Header) {
+	if headers == nil {
+		return
+	}
+
+	headers.Del("Content-Length")
+	headers.Del("Content-Encoding")
+	headers.Del("Trailer")
+	headers.Del("Transfer-Encoding")
+}
+
+func reportPanicAfterTimeout(p any) {
+	_, _ = fmt.Fprintf(gin.DefaultErrorWriter, "[ginx][timeout] panic after deadline: %v\n", p)
+}
+
+func observePanicAfterTimeout(done <-chan struct{}, panicChan <-chan any) {
+	select {
+	case <-done:
+		select {
+		case p := <-panicChan:
+			reportPanicAfterTimeout(p)
+		default:
+		}
+	default:
+		go func() {
+			<-done
+			select {
+			case p := <-panicChan:
+				reportPanicAfterTimeout(p)
+			default:
+			}
+		}()
+	}
 }
 
 // Timeout middleware to set a timeout for requests.
-// This version uses a serial approach to avoid race conditions when accessing headers.
+// This version executes downstream handlers on an isolated context copy to avoid sharing
+// mutable request execution state between goroutines.
 func Timeout(options ...Option[TimeoutConfig]) Middleware {
 	config := defaultTimeoutConfig()
 	for _, option := range options {
@@ -306,7 +165,6 @@ func Timeout(options ...Option[TimeoutConfig]) Middleware {
 
 	return func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
-			// Check for zero or negative timeout, immediately return timeout response
 			if config.Timeout <= 0 {
 				c.Header("Content-Type", "application/json; charset=utf-8")
 				c.Header("X-Timeout", "true")
@@ -314,38 +172,60 @@ func Timeout(options ...Option[TimeoutConfig]) Middleware {
 				return
 			}
 
-			// Save original Writer
 			originalWriter := c.Writer
+			bufferedWriter := newBufferedWriter(originalWriter, config.MaxBufferSize)
 
-			// Create buffered writer
-			bufferedWriter := newBufferedWriter(originalWriter)
-			c.Writer = bufferedWriter
-			defer func() {
-				// Restore original writer so downstream Gin logic (e.g. default 404) writes directly.
-				c.Writer = originalWriter
-			}()
-
-			// Create timeout context
 			ctxWithTimeout, cancel := context.WithTimeout(c.Request.Context(), config.Timeout)
 			defer cancel()
-			// Set timeout context for original request, so copies also inherit it
-			c.Request = c.Request.WithContext(ctxWithTimeout)
+			execRequest := c.Request.WithContext(ctxWithTimeout)
+			execContext := cloneContextForTimeout(c, bufferedWriter, execRequest)
 
-			// Execute handler directly in the same goroutine (serial execution)
-			// This eliminates race conditions on shared header maps
-			next(c)
+			done := make(chan struct{})
+			panicChan := make(chan any, 1)
 
-			// Check if timeout occurred during execution
-			contextTimedOut := ctxWithTimeout.Err() == context.DeadlineExceeded
+			go func() {
+				defer close(done)
+				defer func() {
+					if r := recover(); r != nil {
+						panicChan <- r
+					}
+				}()
+				next(execContext)
+			}()
 
-			if contextTimedOut {
-				// Timeout occurred - write timeout response
-				// Since we're in the same goroutine, no race condition on headers
-				writeTimeoutResponse(originalWriter, bufferedWriter, config)
-			} else {
-				// Handler completed within timeout, flush buffered content
+			select {
+			case <-done:
+				select {
+				case r := <-panicChan:
+					panic(r)
+				default:
+				}
+
+				if ctxWithTimeout.Err() == context.DeadlineExceeded {
+					bufferedWriter.copyHeaders()
+					writeTimeoutResponse(originalWriter, bufferedWriter, config)
+					c.Abort()
+					return
+				}
+
+				syncContextFromTimeoutExecution(c, execContext)
 				bufferedWriter.adoptStatusFromOriginal(originalWriter)
 				bufferedWriter.flushToReal()
+				c.Abort()
+			case <-ctxWithTimeout.Done():
+				if ctxWithTimeout.Err() == context.DeadlineExceeded {
+					// Copy any buffered headers if handler already finished (non-blocking).
+					// In production HTTP, headers must be set BEFORE the first Write call,
+					// so we copy them before writeTimeoutResponse writes the status+body.
+					select {
+					case <-done:
+						bufferedWriter.copyHeaders()
+					default:
+					}
+					writeTimeoutResponse(originalWriter, bufferedWriter, config)
+					observePanicAfterTimeout(done, panicChan)
+				}
+				c.Abort()
 			}
 		}
 	}

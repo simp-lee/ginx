@@ -7,3 +7,4 @@ coverage.*
 .gocache/
 .gotmp/
 .gitignore
+.agents-work/

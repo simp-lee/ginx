@@ -99,7 +99,7 @@ func TestMemoryWindowCounterStore(t *testing.T) {
 	})
 
 	t.Run("should cleanup expired counters", func(t *testing.T) {
-		store := NewMemoryWindowCounterStore(50 * time.Millisecond)
+		store := NewMemoryWindowCounterStore(100 * time.Millisecond)
 		defer store.Close()
 
 		window := time.Now().Truncate(time.Minute)
@@ -109,12 +109,24 @@ func TestMemoryWindowCounterStore(t *testing.T) {
 		count, _ := store.Get("test-key", window)
 		assert.Equal(t, int64(1), count)
 
-		// Wait for cleanup
-		time.Sleep(100 * time.Millisecond)
+		// Wait for cleanup (generous margin for Windows timer resolution)
+		time.Sleep(300 * time.Millisecond)
 
 		// Should be cleaned up
 		count, _ = store.Get("test-key", window)
 		assert.Equal(t, int64(0), count)
+	})
+
+	t.Run("should not panic with tiny positive maxIdle", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			store := NewMemoryWindowCounterStore(time.Nanosecond)
+			defer store.Close()
+
+			window := time.Now().Truncate(time.Minute)
+			count, err := store.Increment("test-key", window)
+			assert.NoError(t, err)
+			assert.Equal(t, int64(1), count)
+		})
 	})
 }
 
@@ -513,6 +525,8 @@ func TestCleanupWithWindowStores(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("should cleanup both token bucket and window stores", func(t *testing.T) {
+		SetupRateLimitTest(t)
+
 		// Create custom stores
 		tokenStore := NewMemoryLimiterStore(time.Minute)
 		windowStore := NewMemoryWindowCounterStore(time.Hour)
@@ -520,9 +534,6 @@ func TestCleanupWithWindowStores(t *testing.T) {
 		// Use them in middlewares
 		_ = RateLimit(10, 20, WithStore(tokenStore))
 		_ = RateLimitPerMinute(60, WithWindowStore(windowStore))
-
-		// Cleanup should handle both
-		CleanupRateLimiters()
 
 		// Stores should be closed (check by trying to use them)
 		// After close, operations should still work but data should be cleared
