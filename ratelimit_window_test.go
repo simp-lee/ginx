@@ -1,6 +1,7 @@
 package ginx
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -764,5 +765,75 @@ func TestDynamicWindowRateLimiting(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, "1000000", w.Header().Get("X-RateLimit-Limit-Day"))
 		assert.Equal(t, "999999", w.Header().Get("X-RateLimit-Remaining-Day"))
+	})
+}
+
+func TestWindowRateLimitCustomResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	SetupRateLimitTest(t)
+
+	customBody := gin.H{
+		"code":    429,
+		"message": "rate limit exceeded",
+		"data":    nil,
+	}
+
+	t.Run("window: custom response replaces default body", func(t *testing.T) {
+		store := NewMemoryWindowCounterStore(time.Minute)
+		defer store.Close()
+
+		middleware := RateLimitPerMinute(1, WithWindowStore(store), WithRateLimitResponse(customBody))
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"ok": true})
+		})
+
+		// First request succeeds
+		c1, w1 := TestContext("GET", "/test", nil)
+		handler(c1)
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Second request should be rate limited with custom body
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		var body map[string]any
+		err := json.Unmarshal(w2.Body.Bytes(), &body)
+		assert.NoError(t, err)
+		assert.Equal(t, float64(429), body["code"])
+		assert.Equal(t, "rate limit exceeded", body["message"])
+		assert.Nil(t, body["data"])
+		// Should NOT contain default fields
+		assert.Empty(t, body["error"])
+		assert.Empty(t, body["retry_after"])
+
+		// Headers should still be set
+		assert.NotEmpty(t, w2.Header().Get("Retry-After"))
+		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Limit-Minute"))
+	})
+
+	t.Run("window: default response when option not set", func(t *testing.T) {
+		store := NewMemoryWindowCounterStore(time.Minute)
+		defer store.Close()
+
+		middleware := RateLimitPerMinute(1, WithWindowStore(store))
+
+		handler := middleware(func(c *gin.Context) {
+			c.JSON(200, gin.H{"ok": true})
+		})
+
+		c1, _ := TestContext("GET", "/test", nil)
+		handler(c1)
+
+		c2, w2 := TestContext("GET", "/test", nil)
+		handler(c2)
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+
+		var body map[string]any
+		err := json.Unmarshal(w2.Body.Bytes(), &body)
+		assert.NoError(t, err)
+		assert.Equal(t, "rate limit exceeded", body["error"])
+		assert.NotNil(t, body["retry_after"])
 	})
 }

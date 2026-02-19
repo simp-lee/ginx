@@ -96,10 +96,14 @@ func (rl *rateLimiter) handleWindowRateLimit(c *gin.Context, window time.Time, c
 		c.Header("Retry-After", strconv.FormatInt(retryAfter, 10))
 	}
 
-	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-		"error":       "rate limit exceeded",
-		"retry_after": retryAfter,
-	})
+	if rl.customResponse != nil {
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, rl.customResponse)
+	} else {
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error":       "rate limit exceeded",
+			"retry_after": retryAfter,
+		})
+	}
 }
 
 // setWindowHeaders adds X-RateLimit-* headers for window-based rate limiting

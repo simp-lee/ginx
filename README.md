@@ -133,6 +133,7 @@ Conditions are lightweight functions of type `func(*gin.Context) bool` used to d
 **Custom conditions:**
 - `Custom(fn func(*gin.Context) bool)` - Custom condition function
 - `OnTimeout()` - Request has timed out
+- `HasRequestID()` - Request has a request ID set in context
 
 **RBAC conditions (require auth):**
 - `IsAuthenticated()` - User is authenticated
@@ -159,6 +160,16 @@ Lightweight request correlation ID middleware. It sets/propagates a unique ID vi
 ```go
 type ContextInjector func(ctx context.Context, requestID string) context.Context
 ```
+
+**Context helpers:**
+- `SetRequestID(c, id string)` - Set request ID in context
+- `GetRequestID(c) (string, bool)` - Get request ID from context
+
+**Utility:**
+- `GetRequestIDFromHeader(r *http.Request, header string) string` - Extract request ID from HTTP request header
+
+**Condition:**
+- `HasRequestID()` - Check if request has a request ID set in context
 
 **Notes:**
 - Logging and Recovery middlewares automatically include `request_id` if present
@@ -270,6 +281,7 @@ Context-based request timeout middleware with buffered response handling to prev
 - `WithTimeout(duration)` - Set timeout duration (default: 30 seconds)
 - `WithTimeoutResponse(response)` - Set custom timeout response (default: JSON with code 408). If the value cannot be JSON-serialized, it will automatically fall back to the default 408 response.
 - `WithTimeoutMessage(message)` - Set timeout message (creates JSON response with code 408)
+- `WithMaxBufferSize(size int)` - Set maximum response buffer size in bytes (default: 0 = unlimited)
 
 **Features:**
 - **Atomic response handling**: Buffered writer prevents partial responses during timeout
@@ -486,6 +498,7 @@ Security note:
 - `WithWait(timeout time.Duration)` - Wait for tokens instead of immediate rejection
 - `WithDynamicLimits(getLimits func(key string) (rps, burst int))` - Dynamic per-key limits
 - `WithStore(store RateLimitStore)` - Custom storage backend (default: shared memory)
+- `WithRateLimitResponse(response any)` - Custom 429 response body (default: JSON with error and retry_after). Follows the same pattern as `WithTimeoutResponse`.
 
 **Header options:**
 - `WithoutRateLimitHeaders()` - Disable `X-RateLimit-*` headers
@@ -546,6 +559,7 @@ Fixed window rate limiting for precise quota management.
 - `WithDynamicWindowLimits(getLimit func(key string) int)` - Dynamic per-key limits
 - `WithoutRateLimitHeaders()` - Disable headers
 - `WithoutRetryAfterHeader()` - Disable Retry-After header
+- `WithRateLimitResponse(response any)` - Custom 429 response body (default: JSON with error and retry_after)
 
 **Note:** Time-window rate limiting does not support `WithWait()` option.
 
@@ -833,11 +847,13 @@ func setupAdvancedCaching(r *gin.Engine, cache shardedcache.CacheInterface) {
         // User-specific data with separate group (privacy isolation)
         When(ginx.And(ginx.MethodIs("GET"), isUserSpecific),
             ginx.CacheWithGroup(cache, "users")).
-        // Never cache admin data (add no-cache headers)
-        When(isAdminData, ginx.Custom(func(c *gin.Context) bool {
-            c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
-            return false // Skip caching middleware entirely
-        })).
+        // Never cache admin data (add no-cache headers via custom middleware)
+        When(isAdminData, func(next gin.HandlerFunc) gin.HandlerFunc {
+            return func(c *gin.Context) {
+                c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+                next(c)
+            }
+        }).
         Build())
 }
 ```
@@ -929,6 +945,57 @@ func getUserDailyLimits(key string) int {
         return 100000   // Pro: 100k per day
     }
     return 10000        // Free: 10k per day
+}
+```
+
+## Test Helpers
+
+Ginx exports lightweight test utilities (in `test_helpers.go`) so downstream packages can unit-test their middleware and handlers without boilerplate.
+
+**Context & handler helpers:**
+- `TestContext(method, path string, headers map[string]string) (*gin.Context, *httptest.ResponseRecorder)` - Create a ready-to-use `gin.Context` in test mode with custom method, path, headers, and a valid `RemoteAddr`
+- `TestMiddleware(name string, executed *[]string) Middleware` - Create a middleware that records its execution by appending `name` to the slice
+- `TestHandler(executed *[]string) gin.HandlerFunc` - Create a handler that records execution by appending `"handler"` to the slice
+
+**Rate limit helpers:**
+- `SetupRateLimitTest(t testing.TB)` - Register automatic cleanup of global rate limiter state via `t.Cleanup`; call at the start of any test that exercises rate limiting
+
+**Assertion helpers:**
+- `AssertContains(slice []string, item string) bool` - Check if a string slice contains an element
+- `AssertEqual(expected, actual interface{}) bool` - Check equality of two values
+- `AssertSliceEqual(expected, actual []string) bool` - Check equality of two string slices
+
+**Example:**
+```go
+package myapp
+
+import (
+    "testing"
+    "github.com/simp-lee/ginx"
+)
+
+func TestMyMiddleware(t *testing.T) {
+    ginx.SetupRateLimitTest(t) // automatic rate-limiter cleanup
+
+    var executed []string
+    c, w := ginx.TestContext("GET", "/api/test", map[string]string{
+        "Authorization": "Bearer token123",
+    })
+
+    // Build a chain: your middleware + recording handler
+    chain := ginx.NewChain().
+        Use(ginx.TestMiddleware("before", &executed)).
+        Use(MyCustomMiddleware()).
+        Build()
+
+    chain(c)
+
+    if w.Code != 200 {
+        t.Errorf("expected 200, got %d", w.Code)
+    }
+    if !ginx.AssertContains(executed, "before") {
+        t.Error("expected 'before' middleware to execute")
+    }
 }
 ```
 

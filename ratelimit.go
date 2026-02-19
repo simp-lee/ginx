@@ -117,6 +117,7 @@ type rateLimiter struct {
 	waitTimeout      time.Duration                         // 0 means no waiting, >0 enables wait mode
 	dynamicLimits    func(key string) (rps int, burst int) // nil means static limits, non-nil enables dynamic limits
 	dynamicWindow    func(key string) int                  // For window-based rate limiting dynamic limits
+	customResponse   any                                   // nil = default response; non-nil replaces all 429 response bodies
 }
 
 // newRateLimiter creates a new rate limiter with the specified requests per second (rps) and burst capacity.
@@ -240,11 +241,15 @@ func (rl *rateLimiter) waitMiddleware() Middleware {
 					c.Header("Retry-After", strconv.FormatInt(retryAfter, 10))
 				}
 
-				c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-					"error":       "rate limit exceeded",
-					"timeout":     rl.waitTimeout.Seconds(),
-					"retry_after": retryAfter,
-				})
+				if rl.customResponse != nil {
+					c.AbortWithStatusJSON(http.StatusTooManyRequests, rl.customResponse)
+				} else {
+					c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+						"error":       "rate limit exceeded",
+						"timeout":     rl.waitTimeout.Seconds(),
+						"retry_after": retryAfter,
+					})
+				}
 				return
 			}
 
@@ -271,10 +276,14 @@ func (rl *rateLimiter) rejectZeroBurst(c *gin.Context, key string) bool {
 		c.Header("Retry-After", "1")
 	}
 
-	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-		"error":       "rate limit exceeded",
-		"retry_after": 1,
-	})
+	if rl.customResponse != nil {
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, rl.customResponse)
+	} else {
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error":       "rate limit exceeded",
+			"retry_after": 1,
+		})
+	}
 	return true
 }
 
@@ -360,9 +369,13 @@ func (rl *rateLimiter) handleRateLimit(c *gin.Context, limiter *rate.Limiter) {
 	//      for negligible accuracy gain.
 	reservation := limiter.Reserve()
 	if !reservation.OK() {
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-			"error": "rate limit exceeded",
-		})
+		if rl.customResponse != nil {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, rl.customResponse)
+		} else {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"error": "rate limit exceeded",
+			})
+		}
 		return
 	}
 
@@ -385,10 +398,14 @@ func (rl *rateLimiter) handleRateLimit(c *gin.Context, limiter *rate.Limiter) {
 		c.Header("Retry-After", strconv.FormatInt(retryAfter, 10))
 	}
 
-	c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-		"error":       "rate limit exceeded",
-		"retry_after": retryAfter,
-	})
+	if rl.customResponse != nil {
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, rl.customResponse)
+	} else {
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error":       "rate limit exceeded",
+			"retry_after": retryAfter,
+		})
+	}
 }
 
 // setHeaders adds X-RateLimit-* headers to the response.

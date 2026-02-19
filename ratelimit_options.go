@@ -182,6 +182,26 @@ func WithDynamicLimits(getLimits func(key string) (rps int, burst int)) RateOpti
 	}
 }
 
+// WithRateLimitResponse sets a custom response body for 429 Too Many Requests responses.
+// When set, all rate-limited responses will use this value instead of the default
+// {"error": "rate limit exceeded", "retry_after": N} format.
+//
+// This follows the same pattern as WithTimeoutResponse — pass any JSON-serializable value.
+// Rate limit headers (X-RateLimit-*, Retry-After) are still set normally.
+//
+// Example:
+//
+//	r.Use(ginx.RateLimit(100, 200, ginx.WithRateLimitResponse(gin.H{
+//	    "code":    429,
+//	    "message": "rate limit exceeded",
+//	    "data":    nil,
+//	})))
+func WithRateLimitResponse(response any) RateOption {
+	return func(rl *rateLimiter) {
+		rl.customResponse = response
+	}
+}
+
 // WithDynamicWindowLimits configures dynamic time-window rate limiting where different keys
 // can have different limits determined at runtime by the provided function.
 // The function receives a key and should return the limit for that key.
