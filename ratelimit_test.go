@@ -10,6 +10,7 @@ package ginx
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"sync"
 	"testing"
@@ -1036,11 +1037,163 @@ func TestInvalidConfigurationCombinations(t *testing.T) {
 	})
 }
 
+// TestErrorFormatterWithRateLimit tests that ErrorFormatter integrates with rate limiting
+func TestErrorFormatterWithRateLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	customFormatter := func(status int, message string) any {
+		return gin.H{"code": status, "msg": message, "source": "custom"}
+	}
+
+	t.Run("standard mode with formatter", func(t *testing.T) {
+		r := gin.New()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		chain := NewChain().
+			Use(ErrorFormat(customFormatter)).
+			Use(RateLimit(1, 1, WithStore(store)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// First request consumes the token
+		w1 := httptest.NewRecorder()
+		r.ServeHTTP(w1, httptest.NewRequest("GET", "/test", nil))
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Second request should be rate limited with formatted response
+		w2 := httptest.NewRecorder()
+		r.ServeHTTP(w2, httptest.NewRequest("GET", "/test", nil))
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+		assert.JSONEq(t, `{"code":429,"msg":"rate limit exceeded","source":"custom"}`, w2.Body.String())
+	})
+
+	t.Run("wait mode with formatter", func(t *testing.T) {
+		r := gin.New()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		chain := NewChain().
+			Use(ErrorFormat(customFormatter)).
+			Use(RateLimit(1, 1, WithStore(store), WithWait(10*time.Millisecond)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume the token
+		w1 := httptest.NewRecorder()
+		r.ServeHTTP(w1, httptest.NewRequest("GET", "/test", nil))
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Wait mode timeout should produce formatted response
+		w2 := httptest.NewRecorder()
+		r.ServeHTTP(w2, httptest.NewRequest("GET", "/test", nil))
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+		assert.JSONEq(t, `{"code":429,"msg":"rate limit exceeded","source":"custom"}`, w2.Body.String())
+	})
+
+	t.Run("zero burst with formatter", func(t *testing.T) {
+		// Use dynamic limits to achieve zero burst without a panic
+		r := gin.New()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		getDynamicLimits := func(key string) (int, int) {
+			return 10, 0 // zero burst → immediate rejection
+		}
+
+		chain := NewChain().
+			Use(ErrorFormat(customFormatter)).
+			Use(RateLimit(100, 200, WithStore(store), WithUser(), WithDynamicLimits(getDynamicLimits)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			SetUserID(c, "zero-burst-user")
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("GET", "/test", nil))
+		assert.Equal(t, http.StatusTooManyRequests, w.Code)
+		assert.JSONEq(t, `{"code":429,"msg":"rate limit exceeded","source":"custom"}`, w.Body.String())
+	})
+
+	t.Run("no formatter default", func(t *testing.T) {
+		r := gin.New()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		// No ErrorFormat middleware — use default response
+		chain := NewChain().
+			Use(RateLimit(1, 1, WithStore(store)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume the token
+		w1 := httptest.NewRecorder()
+		r.ServeHTTP(w1, httptest.NewRequest("GET", "/test", nil))
+		assert.Equal(t, http.StatusOK, w1.Code)
+
+		// Verify default response body
+		w2 := httptest.NewRecorder()
+		r.ServeHTTP(w2, httptest.NewRequest("GET", "/test", nil))
+		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+		assert.JSONEq(t, `{"error":"rate limit exceeded"}`, w2.Body.String())
+	})
+
+	t.Run("headers still set with formatter", func(t *testing.T) {
+		r := gin.New()
+		store := NewMemoryLimiterStore(time.Minute)
+		defer store.Close()
+
+		chain := NewChain().
+			Use(ErrorFormat(customFormatter)).
+			Use(RateLimit(5, 2, WithStore(store)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			c.JSON(200, gin.H{"success": true})
+		})
+
+		// Consume the burst
+		for i := 0; i < 2; i++ {
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest("GET", "/test", nil))
+			assert.Equal(t, http.StatusOK, w.Code)
+		}
+
+		// Rate limited — check headers and formatted body
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("GET", "/test", nil))
+		assert.Equal(t, http.StatusTooManyRequests, w.Code)
+		assert.JSONEq(t, `{"code":429,"msg":"rate limit exceeded","source":"custom"}`, w.Body.String())
+
+		// Retry-After header
+		assert.NotEmpty(t, w.Header().Get("Retry-After"))
+		retrySeconds, err := strconv.Atoi(w.Header().Get("Retry-After"))
+		assert.NoError(t, err)
+		assert.GreaterOrEqual(t, retrySeconds, 1)
+
+		// X-RateLimit-* headers
+		assert.Equal(t, "5", w.Header().Get("X-RateLimit-Limit"))
+		assert.Equal(t, "0", w.Header().Get("X-RateLimit-Remaining"))
+		assert.NotEmpty(t, w.Header().Get("X-RateLimit-Reset"))
+	})
+}
+
 // TestRetryAfterConsistency tests that Retry-After is calculated consistently
 func TestRetryAfterConsistency(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	t.Run("should have consistent Retry-After in header and JSON", func(t *testing.T) {
+	t.Run("should have Retry-After header on rate limit", func(t *testing.T) {
 		store := NewMemoryLimiterStore(time.Minute)
 		defer store.Close()
 
@@ -1063,21 +1216,14 @@ func TestRetryAfterConsistency(t *testing.T) {
 		retryAfterHeader := w2.Header().Get("Retry-After")
 		assert.NotEmpty(t, retryAfterHeader)
 
-		// Parse JSON response to check retry_after field
+		headerSeconds, _ := strconv.Atoi(retryAfterHeader)
+		assert.GreaterOrEqual(t, headerSeconds, 1) // At least 1 second
+
+		// Body should use standard error format (no retry_after in body)
 		var response map[string]interface{}
 		err := json.Unmarshal(w2.Body.Bytes(), &response)
 		assert.NoError(t, err)
-
-		retryAfterJSON, exists := response["retry_after"]
-		assert.True(t, exists)
-
-		// Convert both to strings for comparison (JSON numbers might be float64)
-		headerSeconds, _ := strconv.Atoi(retryAfterHeader)
-		jsonSeconds := int(retryAfterJSON.(float64))
-
-		// Should be the same value
-		assert.Equal(t, headerSeconds, jsonSeconds)
-		assert.GreaterOrEqual(t, headerSeconds, 1) // At least 1 second
+		assert.Equal(t, "rate limit exceeded", response["error"])
 	})
 }
 
@@ -1357,153 +1503,6 @@ func TestWaitVsStandardRetryAfterConsistency(t *testing.T) {
 		// Both should use actual delay calculation (~0.5s for 2rps, rounded up to 1)
 		assert.Equal(t, 1, standardSeconds, "Standard mode uses actual delay calculation")
 		assert.Equal(t, 1, waitSeconds, "Wait mode should also use actual delay calculation, not timeout value")
-	})
-}
-
-func TestWithRateLimitResponse(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	customBody := gin.H{
-		"code":    float64(429),
-		"message": "rate limit exceeded",
-		"data":    nil,
-	}
-
-	t.Run("standard: custom response replaces default body", func(t *testing.T) {
-		store := NewMemoryLimiterStore(time.Minute)
-		defer store.Close()
-		middleware := RateLimit(1, 1, WithStore(store), WithRateLimitResponse(customBody))
-
-		handler := middleware(func(c *gin.Context) {
-			c.JSON(200, gin.H{"ok": true})
-		})
-
-		// Exhaust burst
-		c1, w1 := TestContext("GET", "/test", nil)
-		handler(c1)
-		assert.Equal(t, http.StatusOK, w1.Code)
-
-		// Should get custom response
-		c2, w2 := TestContext("GET", "/test", nil)
-		handler(c2)
-		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
-
-		var body map[string]any
-		assert.NoError(t, json.Unmarshal(w2.Body.Bytes(), &body))
-		assert.Equal(t, float64(429), body["code"])
-		assert.Equal(t, "rate limit exceeded", body["message"])
-		assert.Nil(t, body["data"])
-		// Should NOT contain default fields
-		assert.Empty(t, body["error"])
-		assert.Empty(t, body["retry_after"])
-
-		// Headers should still be set
-		assert.NotEmpty(t, w2.Header().Get("Retry-After"))
-		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Limit"))
-	})
-
-	t.Run("standard: default response when option not set", func(t *testing.T) {
-		store := NewMemoryLimiterStore(time.Minute)
-		defer store.Close()
-		middleware := RateLimit(1, 1, WithStore(store))
-
-		handler := middleware(func(c *gin.Context) {
-			c.JSON(200, gin.H{"ok": true})
-		})
-
-		c1, _ := TestContext("GET", "/test", nil)
-		handler(c1)
-
-		c2, w2 := TestContext("GET", "/test", nil)
-		handler(c2)
-		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
-
-		var body map[string]any
-		assert.NoError(t, json.Unmarshal(w2.Body.Bytes(), &body))
-		assert.Equal(t, "rate limit exceeded", body["error"])
-		assert.NotNil(t, body["retry_after"])
-	})
-
-	t.Run("wait: custom response on timeout", func(t *testing.T) {
-		store := NewMemoryLimiterStore(time.Minute)
-		defer store.Close()
-		middleware := RateLimit(1, 1, WithStore(store), WithWait(10*time.Millisecond), WithRateLimitResponse(customBody))
-
-		handler := middleware(func(c *gin.Context) {
-			c.JSON(200, gin.H{"ok": true})
-		})
-
-		c1, w1 := TestContext("GET", "/test", nil)
-		handler(c1)
-		assert.Equal(t, http.StatusOK, w1.Code)
-
-		c2, w2 := TestContext("GET", "/test", nil)
-		handler(c2)
-		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
-
-		var body map[string]any
-		assert.NoError(t, json.Unmarshal(w2.Body.Bytes(), &body))
-		assert.Equal(t, float64(429), body["code"])
-		assert.Equal(t, "rate limit exceeded", body["message"])
-		// Should NOT contain default fields
-		assert.Empty(t, body["error"])
-		assert.Empty(t, body["timeout"])
-
-		assert.NotEmpty(t, w2.Header().Get("Retry-After"))
-	})
-
-	t.Run("zeroBurst: custom response on dynamic zero burst", func(t *testing.T) {
-		store := NewMemoryLimiterStore(time.Minute)
-		defer store.Close()
-		middleware := RateLimit(100, 200, WithStore(store), WithUser(),
-			WithDynamicLimits(func(key string) (int, int) {
-				if key == "user:blocked" {
-					return 10, 0
-				}
-				return 100, 200
-			}),
-			WithRateLimitResponse(customBody),
-		)
-
-		handler := middleware(func(c *gin.Context) {
-			c.JSON(200, gin.H{"ok": true})
-		})
-
-		c1, w1 := TestContext("GET", "/test", nil)
-		SetUserID(c1, "blocked")
-		handler(c1)
-		assert.Equal(t, http.StatusTooManyRequests, w1.Code)
-
-		var body map[string]any
-		assert.NoError(t, json.Unmarshal(w1.Body.Bytes(), &body))
-		assert.Equal(t, float64(429), body["code"])
-		assert.Empty(t, body["error"])
-
-		assert.Equal(t, "1", w1.Header().Get("Retry-After"))
-		assert.Equal(t, "10", w1.Header().Get("X-RateLimit-Limit"))
-	})
-
-	t.Run("headers not affected by custom response", func(t *testing.T) {
-		store := NewMemoryLimiterStore(time.Minute)
-		defer store.Close()
-		middleware := RateLimit(10, 1, WithStore(store), WithRateLimitResponse(customBody))
-
-		handler := middleware(func(c *gin.Context) {
-			c.JSON(200, gin.H{"ok": true})
-		})
-
-		c1, _ := TestContext("GET", "/test", nil)
-		handler(c1)
-
-		c2, w2 := TestContext("GET", "/test", nil)
-		handler(c2)
-		assert.Equal(t, http.StatusTooManyRequests, w2.Code)
-
-		// All standard headers should still be present
-		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Limit"))
-		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Remaining"))
-		assert.NotEmpty(t, w2.Header().Get("X-RateLimit-Reset"))
-		assert.NotEmpty(t, w2.Header().Get("Retry-After"))
 	})
 }
 

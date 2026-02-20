@@ -343,6 +343,81 @@ func TestChainEdgeCases(t *testing.T) {
 	})
 }
 
+func TestChainWithErrorFormat(t *testing.T) {
+	t.Run("WithErrorFormat sets error formatter", func(t *testing.T) {
+		formatter := func(status int, message string) any {
+			return map[string]any{"code": status, "msg": message}
+		}
+
+		chain := NewChain().WithErrorFormat(formatter)
+
+		if chain.errorFormatter == nil {
+			t.Error("WithErrorFormat should set the error formatter")
+		}
+	})
+
+	t.Run("WithErrorFormat returns chain for method chaining", func(t *testing.T) {
+		chain := NewChain()
+
+		result := chain.WithErrorFormat(func(status int, message string) any {
+			return nil
+		})
+
+		if result != chain {
+			t.Error("WithErrorFormat should return the same chain instance for method chaining")
+		}
+	})
+
+	t.Run("Build injects formatter into context", func(t *testing.T) {
+		formatter := func(status int, message string) any {
+			return map[string]any{"code": status, "msg": message}
+		}
+
+		var capturedFormatter ErrorFormatter
+
+		inspectMiddleware := func(next gin.HandlerFunc) gin.HandlerFunc {
+			return func(c *gin.Context) {
+				capturedFormatter = GetErrorFormatter(c)
+				next(c)
+			}
+		}
+
+		chain := NewChain().
+			WithErrorFormat(formatter).
+			Use(inspectMiddleware)
+
+		handler := chain.Build()
+		c, _ := TestContext("GET", "/test", nil)
+		handler(c)
+
+		if capturedFormatter == nil {
+			t.Error("Build should inject error formatter into context before middleware execution")
+		}
+	})
+
+	t.Run("Build does not inject formatter when not set", func(t *testing.T) {
+		var capturedFormatter ErrorFormatter
+
+		inspectMiddleware := func(next gin.HandlerFunc) gin.HandlerFunc {
+			return func(c *gin.Context) {
+				capturedFormatter = GetErrorFormatter(c)
+				next(c)
+			}
+		}
+
+		chain := NewChain().
+			Use(inspectMiddleware)
+
+		handler := chain.Build()
+		c, _ := TestContext("GET", "/test", nil)
+		handler(c)
+
+		if capturedFormatter != nil {
+			t.Error("Build should not inject formatter when not set")
+		}
+	})
+}
+
 func TestChainErrorHandlerExecution(t *testing.T) {
 	t.Run("ErrorHandler should be called when middleware reports error", func(t *testing.T) {
 		var errorHandlerCalled bool

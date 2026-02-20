@@ -4,8 +4,9 @@ import "github.com/gin-gonic/gin"
 
 // Chain is a middleware chain builder for Gin
 type Chain struct {
-	middlewares  []Middleware
-	errorHandler ErrorHandler
+	middlewares    []Middleware
+	errorHandler   ErrorHandler
+	errorFormatter ErrorFormatter
 }
 
 // NewChain creates a new Chain instance
@@ -57,26 +58,35 @@ func (c *Chain) OnError(handler ErrorHandler) *Chain {
 	return c
 }
 
-// Build builds the final gin.HandlerFunc
+// WithErrorFormat sets the ErrorFormatter for the chain.
+// When set, the formatter is injected into every request context
+// before middleware execution, making it available via GetErrorFormatter.
+func (c *Chain) WithErrorFormat(f ErrorFormatter) *Chain {
+	c.errorFormatter = f
+	return c
+}
+
+// Build builds the final gin.HandlerFunc.
+// The middleware chain is constructed once at setup time, not per request.
 func (c *Chain) Build() gin.HandlerFunc {
+	// Build chain once at setup time — avoids O(N) heap allocations per request.
+	handler := func(ctx *gin.Context) {
+		ctx.Next()
+	}
+	for i := len(c.middlewares) - 1; i >= 0; i-- {
+		handler = c.middlewares[i](handler)
+	}
+	f := c.errorFormatter
+	eh := c.errorHandler
 	return func(ctx *gin.Context) {
-		// Create the execution chain
-		handler := func(ctx *gin.Context) {
-			ctx.Next()
+		// Inject error formatter into context if set
+		if f != nil {
+			SetErrorFormatter(ctx, f)
 		}
-
-		// Apply middleware from last to first
-		for i := len(c.middlewares) - 1; i >= 0; i-- {
-			handler = c.middlewares[i](handler)
-		}
-
-		// Execute the middleware chain
 		handler(ctx)
-
 		// Check for errors after middleware chain execution
-		if c.errorHandler != nil && len(ctx.Errors) > 0 {
-			// Call error handler with the last error
-			c.errorHandler(ctx, ctx.Errors.Last().Err)
+		if eh != nil && len(ctx.Errors) > 0 {
+			eh(ctx, ctx.Errors.Last().Err)
 		}
 	}
 }

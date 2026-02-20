@@ -22,8 +22,8 @@ func main() {
 	fmt.Println("\n💡 架构亮点：")
 	fmt.Println("  - Logger 中间件负责所有请求的基础日志")
 	fmt.Println("  - Timeout 中间件专注于超时处理")
-	fmt.Println("  - OnTimeout 条件函数识别超时请求")
-	fmt.Println("  - Chain.When() 实现条件性日志增强")
+	fmt.Println("  - 通过 c.Next() 后 IsTimeout() 识别超时请求")
+	fmt.Println("  - 独立后置中间件实现超时日志增强")
 	fmt.Println("  - 职责分离，组合优于继承 🎯")
 
 	log.Fatal(http.ListenAndServe(":8080", r))
@@ -38,25 +38,28 @@ func newRouter() *gin.Engine {
 	// 这展示了架构设计的优雅之处：每个中间件职责单一，通过组合实现复杂功能
 
 	chain := ginx.NewChain().
+		// 统一错误响应格式
+		WithErrorFormat(func(status int, msg string) any {
+			return gin.H{"code": status, "message": msg}
+		}).
 		// 1. 普通请求的日志记录（INFO 级别）
 		Use(ginx.Logger(
 			logger.WithConsole(true),
 		)).
 		// 2. 超时中间件
 		Use(ginx.Timeout(
-			ginx.WithTimeout(2*time.Second),
-			ginx.WithTimeoutResponse(gin.H{
-				"code":    408,
-				"message": "请求超时，请稍后重试",
-				"error":   "timeout",
-			}),
-		)).
-		// 3. 🔥 关键亮点：仅对超时请求记录 WARN 级别的特殊日志
-		When(ginx.OnTimeout(), ginx.Logger(
-			logger.WithConsole(true),
+			ginx.WithTimeout(2 * time.Second),
 		))
 
 	r.Use(chain.Build())
+
+	// 3. 🔥 关键亮点：在 c.Next() 后检查 IsTimeout，仅对超时请求输出额外日志
+	r.Use(func(c *gin.Context) {
+		c.Next()
+		if ginx.IsTimeout(c) {
+			log.Printf("[WARN] timeout request method=%s path=%s status=%d", c.Request.Method, c.Request.URL.Path, c.Writer.Status())
+		}
+	})
 
 	// 正常响应的路由
 	r.GET("/fast", func(c *gin.Context) {

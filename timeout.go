@@ -12,8 +12,7 @@ import (
 
 // TimeoutConfig timeout middleware configuration
 type TimeoutConfig struct {
-	Timeout  time.Duration `json:"timeout"`  // Timeout duration
-	Response any           `json:"response"` // Timeout response content
+	Timeout time.Duration `json:"timeout"` // Timeout duration
 	// MaxBufferSize limits the response buffer size in bytes (0 = unlimited).
 	// When a response exceeds this limit, it is flushed directly to the client,
 	// bypassing timeout protection for that request. This prevents memory exhaustion
@@ -25,10 +24,6 @@ type TimeoutConfig struct {
 func defaultTimeoutConfig() *TimeoutConfig {
 	return &TimeoutConfig{
 		Timeout: 30 * time.Second,
-		Response: gin.H{
-			"code":  408,
-			"error": "request timeout",
-		},
 	}
 }
 
@@ -36,23 +31,6 @@ func defaultTimeoutConfig() *TimeoutConfig {
 func WithTimeout(timeout time.Duration) Option[TimeoutConfig] {
 	return func(c *TimeoutConfig) {
 		c.Timeout = timeout
-	}
-}
-
-// WithTimeoutResponse sets timeout response content
-func WithTimeoutResponse(response any) Option[TimeoutConfig] {
-	return func(c *TimeoutConfig) {
-		c.Response = response
-	}
-}
-
-// WithTimeoutMessage sets timeout message
-func WithTimeoutMessage(message string) Option[TimeoutConfig] {
-	return func(c *TimeoutConfig) {
-		c.Response = gin.H{
-			"error": message,
-			"code":  408,
-		}
 	}
 }
 
@@ -72,7 +50,7 @@ func WithMaxBufferSize(size int) Option[TimeoutConfig] {
 // buffer-overflow path (which writes directly to originalWriter under the same mutex).
 // If the handler has already flushed to the real writer (written == true), the timeout
 // response is skipped because the client is already receiving the handler's response.
-func writeTimeoutResponse(originalWriter gin.ResponseWriter, bufferedWriter *bufferedWriter, config *TimeoutConfig) {
+func writeTimeoutResponse(originalWriter gin.ResponseWriter, bufferedWriter *bufferedWriter, formatter ErrorFormatter) {
 	bufferedWriter.mutex.Lock()
 	bufferedWriter.markTimeout()
 
@@ -94,19 +72,19 @@ func writeTimeoutResponse(originalWriter gin.ResponseWriter, bufferedWriter *buf
 	originalWriter.Header().Set("X-Timeout", "true")
 	originalWriter.WriteHeader(http.StatusRequestTimeout)
 
-	// Serialize JSON response directly from config or use default
-	var jsonBytes []byte
-
-	if config.Response != nil {
-		if data, err := json.Marshal(config.Response); err == nil {
-			jsonBytes = data
-		} else {
-			// Use default response as fallback if serialization fails
-			jsonBytes = []byte(`{"code":408,"error":"request timeout"}`)
-		}
+	// Build response body via formatter or default
+	var body any
+	if formatter != nil {
+		body = formatter(http.StatusRequestTimeout, "request timeout")
 	} else {
-		jsonBytes = []byte(`{"code":408,"error":"request timeout"}`)
+		body = gin.H{"error": "request timeout"}
 	}
+
+	jsonBytes, err := json.Marshal(body)
+	if err != nil {
+		jsonBytes = []byte(`{"error":"request timeout"}`)
+	}
+
 	if _, err := originalWriter.Write(jsonBytes); err != nil {
 		_, _ = fmt.Fprintf(gin.DefaultErrorWriter, "[ginx][timeout] failed to write timeout response: %v\n", err)
 	}
@@ -165,10 +143,11 @@ func Timeout(options ...Option[TimeoutConfig]) Middleware {
 
 	return func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
+			formatter := GetErrorFormatter(c)
+
 			if config.Timeout <= 0 {
-				c.Header("Content-Type", "application/json; charset=utf-8")
 				c.Header("X-Timeout", "true")
-				c.AbortWithStatusJSON(http.StatusRequestTimeout, config.Response)
+				AbortWithError(c, http.StatusRequestTimeout, "request timeout")
 				return
 			}
 
@@ -203,7 +182,7 @@ func Timeout(options ...Option[TimeoutConfig]) Middleware {
 
 				if ctxWithTimeout.Err() == context.DeadlineExceeded {
 					bufferedWriter.copyHeaders()
-					writeTimeoutResponse(originalWriter, bufferedWriter, config)
+					writeTimeoutResponse(originalWriter, bufferedWriter, formatter)
 					c.Abort()
 					return
 				}
@@ -222,7 +201,7 @@ func Timeout(options ...Option[TimeoutConfig]) Middleware {
 						bufferedWriter.copyHeaders()
 					default:
 					}
-					writeTimeoutResponse(originalWriter, bufferedWriter, config)
+					writeTimeoutResponse(originalWriter, bufferedWriter, formatter)
 					observePanicAfterTimeout(done, panicChan)
 				}
 				c.Abort()

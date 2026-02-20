@@ -32,9 +32,7 @@ func (rl *rateLimiter) windowMiddleware() Middleware {
 			count, allowed, err := rl.windowStore.IncrementWithinLimit(key, window, int64(limit))
 			if err != nil {
 				// On store failure, respond with 500 to avoid silent drops
-				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-					"error": "rate limiter store failure",
-				})
+				AbortWithError(c, http.StatusInternalServerError, "rate limiter store failure")
 				return
 			}
 
@@ -96,14 +94,7 @@ func (rl *rateLimiter) handleWindowRateLimit(c *gin.Context, window time.Time, c
 		c.Header("Retry-After", strconv.FormatInt(retryAfter, 10))
 	}
 
-	if rl.customResponse != nil {
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, rl.customResponse)
-	} else {
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-			"error":       "rate limit exceeded",
-			"retry_after": retryAfter,
-		})
-	}
+	AbortWithError(c, http.StatusTooManyRequests, "rate limit exceeded")
 }
 
 // setWindowHeaders adds X-RateLimit-* headers for window-based rate limiting

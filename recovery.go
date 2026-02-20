@@ -15,10 +15,7 @@ import (
 type RecoveryHandler func(*gin.Context, any)
 
 func defaultRecoveryHandler(c *gin.Context, err any) {
-	c.AbortWithStatusJSON(500, gin.H{
-		"error":   "Internal Server Error",
-		"message": "An unexpected error occurred",
-	})
+	AbortWithError(c, 500, "internal server error")
 }
 
 // Recovery creates a panic recovery middleware.

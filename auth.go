@@ -62,14 +62,14 @@ func Auth(jwtService jwt.Service, options ...Option[AuthConfig]) Middleware {
 			// Get token from Authorization header (or query parameter when explicitly enabled)
 			tokenString := extractTokenWithConfig(c, config.AllowQueryToken)
 			if tokenString == "" {
-				c.AbortWithStatusJSON(401, gin.H{"error": "missing token"})
+				AbortWithError(c, 401, "missing token")
 				return
 			}
 
 			// Validate and parse the token
 			parsedToken, err := jwtService.ValidateAndParse(tokenString)
 			if err != nil {
-				c.AbortWithStatusJSON(401, gin.H{"error": "invalid token"})
+				AbortWithError(c, 401, "invalid token")
 				return
 			}
 

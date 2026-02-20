@@ -6,6 +6,7 @@ Minimal, composable, and high-performance middleware toolkit for Gin, with condi
 
 - Functional composition: Chain + Condition to precisely control execution
 - Production-ready: recovery, logging, timeout, CORS, auth, RBAC, cache, rate limit
+- Unified error formatting: one `ErrorFormatter` controls all middleware error responses
 - High performance: zero-allocation conditions, token-bucket & time-window rate limiting, sharded cache
 - Clean API: unified Option/Condition pattern, easy to extend
 
@@ -76,10 +77,11 @@ r.Use(chain.Build())
 ## Core Concepts
 
 ```go
-type Middleware func(gin.HandlerFunc) gin.HandlerFunc
-type Condition  func(*gin.Context) bool
-type Option[T any] func(*T)
-type ErrorHandler func(*gin.Context, error)
+type Middleware      func(gin.HandlerFunc) gin.HandlerFunc
+type Condition       func(*gin.Context) bool
+type Option[T any]   func(*T)
+type ErrorHandler    func(*gin.Context, error)
+type ErrorFormatter  func(status int, message string) any
 ```
 
 ### Chain (functional composition)
@@ -92,6 +94,7 @@ Chain provides fluent API for building middleware chains with conditional execut
 - `When(cond Condition, m Middleware)` - Add middleware if condition is true
 - `Unless(cond Condition, m Middleware)` - Add middleware if condition is false
 - `OnError(handler ErrorHandler)` - Set error handler for chain execution
+- `WithErrorFormat(f ErrorFormatter)` - Set unified error response format for all middleware in the chain
 - `Build()` - Build final `gin.HandlerFunc`
 
 Note:
@@ -142,6 +145,81 @@ Conditions are lightweight functions of type `func(*gin.Context) bool` used to d
 - `HasUserPermission(service rbac.Service, resource, action string)` - Direct user permissions only
 
 ## Middleware Overview
+
+### ErrorFormatter (unified error responses)
+
+Unified error response formatting for all middleware. Instead of configuring error responses per-middleware, a single `ErrorFormatter` function controls how every middleware (auth, RBAC, timeout, rate limit, recovery) renders its error response.
+
+**Usage:**
+- `Chain.WithErrorFormat(f ErrorFormatter)` - Set formatter for an entire chain
+- `ErrorFormat(f ErrorFormatter)` - Standalone middleware (for use without Chain)
+
+**Context helpers:**
+- `SetErrorFormatter(c *gin.Context, f ErrorFormatter)` - Set formatter in context
+- `GetErrorFormatter(c *gin.Context) ErrorFormatter` - Get formatter from context (nil if not set)
+- `AbortWithError(c *gin.Context, status int, message string)` - Write error response using the formatter, or fall back to `{"error": "<message>"}`
+
+**Default behavior (no formatter set):**
+```json
+{"error": "request timeout"}
+```
+
+**Example with Chain:**
+```go
+r.Use(ginx.NewChain().
+    WithErrorFormat(func(status int, msg string) any {
+        return gin.H{
+            "code":    status,
+            "message": msg,
+            "success": false,
+        }
+    }).
+    Use(ginx.Recovery()).
+    Use(ginx.Logger()).
+    Use(ginx.Timeout(ginx.WithTimeout(10 * time.Second))).
+    Use(ginx.RateLimit(100, 200)).
+    Build())
+
+// All middleware errors now return:
+// {"code": 429, "message": "rate limit exceeded", "success": false}
+// {"code": 408, "message": "request timeout", "success": false}
+// etc.
+```
+
+**Example with standalone middleware (no Chain):**
+```go
+// Works with standard Gin middleware registration
+r.Use(ginx.ErrorFormat(func(status int, msg string) any {
+    return gin.H{"code": status, "message": msg}
+})(func(c *gin.Context) { c.Next() }))
+
+r.Use(ginx.Timeout(ginx.WithTimeout(10 * time.Second))(func(c *gin.Context) { c.Next() }))
+```
+
+**Example per route group:**
+```go
+// Different formats for different API versions
+v1 := r.Group("/api/v1")
+v1.Use(ginx.NewChain().
+    WithErrorFormat(func(status int, msg string) any {
+        return gin.H{"error": msg, "status": status}
+    }).
+    Use(ginx.RateLimit(100, 200)).
+    Build())
+
+v2 := r.Group("/api/v2")
+v2.Use(ginx.NewChain().
+    WithErrorFormat(func(status int, msg string) any {
+        return gin.H{"code": status, "message": msg, "ok": false}
+    }).
+    Use(ginx.RateLimit(100, 200)).
+    Build())
+```
+
+**Notes:**
+- One `ErrorFormatter` replaces the need for per-middleware response options
+- All middleware use `AbortWithError` internally, so the formatter applies uniformly
+- When no formatter is set, the default response is `{"error": "<message>"}`
 
 ### RequestID (correlation id)
 
@@ -238,9 +316,10 @@ ginx.Recovery()
 
 // Custom recovery handler with structured response
 ginx.RecoveryWith(func(c *gin.Context, err any) {
+    rid, _ := ginx.GetRequestID(c)
     c.JSON(500, gin.H{
         "error": "Internal Server Error", 
-        "request_id": c.GetString("request_id"),
+        "request_id": rid,
         "timestamp": time.Now().Unix(),
     })
 }, logger.WithLevel(slog.LevelError), logger.WithConsole(true))
@@ -256,6 +335,7 @@ Structured HTTP request logging middleware with configurable log levels and comp
 **Features:**
 - **Smart log levels**: Automatic level based on status code (5xx=Error, 4xx=Warn, others=Info)
 - **Rich metadata**: Method, path, query, status, latency, IP, user agent, size, protocol, referer
+- **Query sanitization**: Automatically redacts sensitive query parameters (`token`, `access_token`, `id_token`, `jwt`, `authorization`, `auth`, `password`, `secret`)
 - **Error tracking**: Separate error logging for gin context errors (when present)
 - **Structured format**: Uses `github.com/simp-lee/logger` with key-value pairs
 - **Performance optimized**: Single timer measurement, minimal allocations
@@ -279,8 +359,6 @@ Context-based request timeout middleware with buffered response handling to prev
 
 **Options:**
 - `WithTimeout(duration)` - Set timeout duration (default: 30 seconds)
-- `WithTimeoutResponse(response)` - Set custom timeout response (default: JSON with code 408). If the value cannot be JSON-serialized, it will automatically fall back to the default 408 response.
-- `WithTimeoutMessage(message)` - Set timeout message (creates JSON response with code 408)
 - `WithMaxBufferSize(size int)` - Set maximum response buffer size in bytes (default: 0 = unlimited)
 
 **Features:**
@@ -291,7 +369,12 @@ Context-based request timeout middleware with buffered response handling to prev
 
 **Helpers:**
 - `IsTimeout(c *gin.Context) bool` - Check if request timed out
-- Condition `OnTimeout()` - For conditional middleware on timeout responses
+- Condition `OnTimeout()` - Check `X-Timeout` header (pre-execution condition; not suitable for post-result timeout detection)
+
+**Important timing note:**
+- `OnTimeout()` is evaluated before the wrapped middleware executes, so it cannot reliably detect timeouts that are decided later in the request lifecycle.
+- To detect timeout outcomes, use `IsTimeout(c)` after `c.Next()` in outer middleware.
+- Inside a timeout-protected handler, use `c.Request.Context().Done()` / `c.Request.Context().Err()` to stop work early.
 
 **Example:**
 ```go
@@ -429,10 +512,12 @@ HTTP-compliant response caching middleware with intelligent cache control and gr
 - `CacheWithGroupOptions(cache shardedcache.CacheInterface, groupName string, opts ...CacheOption)` - Grouped cache with custom options
 
 **Features:**
-- **HTTP-compliant caching**: Respects `Cache-Control: no-store/private` directives
+- **HTTP-compliant caching**: Respects `Cache-Control: no-store/private/no-cache/must-revalidate/max-age=0` directives
 - **Smart exclusions**: Automatically excludes responses with `Set-Cookie` headers to prevent user data leakage
-- **Auth-safe default**: Skips caching when request contains `Authorization` header
-- **2xx-only caching**: Only caches successful responses (200-299 status codes)
+- **Auth/session-safe default**: Skips caching when request contains `Authorization` or `Cookie` header
+- **Range-safe**: Bypasses cache for `Range` requests and `Content-Range` responses (partial content)
+- **2xx-only caching**: Only caches successful responses (200-299, excluding 206 Partial Content)
+- **GET & HEAD support**: Caches both GET and HEAD responses; only body is omitted on HEAD replay
 - **Safer default cache keys**: Generated from HTTP method + host + path + query (`METHOD|HOST|PATH?QUERY`)
 - **Content negotiation safety**: Default keys include `Accept-Encoding` variant when present to avoid representation mix-ups
 - **Configurable key strategy**: `WithCacheKeyFunc(func(*gin.Context) string)` supports custom variant/context dimensions
@@ -442,9 +527,9 @@ HTTP-compliant response caching middleware with intelligent cache control and gr
 
 **Cache key format:**
 ```
-GET|api.example.com|/api/users                    // No query parameters
-POST|api.example.com|/api/search?q=test&limit=10  // With query parameters
-GET|api.example.com|/api/users|h:Accept-Encoding=gzip // Content-encoding variant
+GET|api.example.com|/api/users                         // No query parameters
+GET|api.example.com|/api/search?q=test&limit=10        // With query parameters
+GET|api.example.com|/api/users|h:Accept-Encoding=gzip  // Content-encoding variant
 ```
 
 **Example:**
@@ -497,8 +582,7 @@ Security note:
 - `WithSkipFunc(skipFunc func(*gin.Context) bool)` - Skip certain requests
 - `WithWait(timeout time.Duration)` - Wait for tokens instead of immediate rejection
 - `WithDynamicLimits(getLimits func(key string) (rps, burst int))` - Dynamic per-key limits
-- `WithStore(store RateLimitStore)` - Custom storage backend (default: shared memory)
-- `WithRateLimitResponse(response any)` - Custom 429 response body (default: JSON with error and retry_after). Follows the same pattern as `WithTimeoutResponse`.
+- `WithStore(store RateLimitStore)` - Custom storage backend (default: shared memory; see [Custom Storage Backends](#custom-storage-backends))
 
 **Header options:**
 - `WithoutRateLimitHeaders()` - Disable `X-RateLimit-*` headers
@@ -555,11 +639,10 @@ Fixed window rate limiting for precise quota management.
 - `WithPath()` - Per-path limiting
 - `WithKeyFunc()` - Custom key function
 - `WithSkipFunc()` - Skip certain requests
-- `WithWindowStore(store WindowCounterStore)` - Custom storage backend
+- `WithWindowStore(store WindowCounterStore)` - Custom storage backend (see [Custom Storage Backends](#custom-storage-backends))
 - `WithDynamicWindowLimits(getLimit func(key string) int)` - Dynamic per-key limits
 - `WithoutRateLimitHeaders()` - Disable headers
 - `WithoutRetryAfterHeader()` - Disable Retry-After header
-- `WithRateLimitResponse(response any)` - Custom 429 response body (default: JSON with error and retry_after)
 
 **Note:** Time-window rate limiting does not support `WithWait()` option.
 
@@ -647,6 +730,49 @@ Retry-After: 30
 **Resource management:**
 - Built-in shared memory stores with automatic cleanup
 - Call `ginx.CleanupRateLimiters()` on application shutdown for comprehensive cleanup
+
+#### Custom Storage Backends
+
+For advanced scenarios (e.g. Redis-backed rate limiting), implement the exported store interfaces:
+
+**Token bucket store:**
+```go
+// RateLimitStore defines the interface for storing and managing rate limiters.
+type RateLimitStore interface {
+    Get(key string) (*rate.Limiter, bool)
+    Set(key string, limiter *rate.Limiter)
+    Delete(key string)
+    Clear()
+    Close() error
+}
+```
+
+**Time-window counter store:**
+```go
+// WindowCounterStore defines the interface for storing time-window based counters.
+type WindowCounterStore interface {
+    Increment(key string, window time.Time) (int64, error)
+    IncrementWithinLimit(key string, window time.Time, limit int64) (count int64, allowed bool, err error)
+    Get(key string, window time.Time) (int64, error)
+    Clear()
+    Close() error
+}
+```
+
+**Built-in constructors:**
+- `NewMemoryLimiterStore(maxIdle time.Duration) RateLimitStore` - In-memory token bucket store with auto-cleanup
+- `NewMemoryWindowCounterStore(maxIdle time.Duration) WindowCounterStore` - In-memory window counter store with auto-cleanup
+
+**Example:**
+```go
+// Use custom store for token bucket rate limiting
+customStore := ginx.NewMemoryLimiterStore(30 * time.Minute)
+r.Use(ginx.RateLimit(100, 200, ginx.WithStore(customStore)))
+
+// Use custom store for window rate limiting
+windowStore := ginx.NewMemoryWindowCounterStore(2 * time.Hour)
+r.Use(ginx.RateLimitPerHour(1000, ginx.WithWindowStore(windowStore)))
+```
 
 ## Advanced Examples
 
@@ -1013,11 +1139,11 @@ func TestMyMiddleware(t *testing.T) {
 - `github.com/gin-gonic/gin` v1.11.0 - Web framework
 - `golang.org/x/time` v0.14.0 - Rate limiting implementation
 
-**Optional feature dependencies:**
-- `github.com/simp-lee/jwt` - JWT authentication (for Auth middleware)
-- `github.com/simp-lee/rbac` - Role-based access control (for RBAC middleware)  
-- `github.com/simp-lee/logger` - Structured logging (for Logger/Recovery middleware)
-- `github.com/simp-lee/cache` - Response caching (for Cache middleware)
+**Feature dependencies (pulled automatically):**
+- `github.com/simp-lee/jwt` - JWT authentication (Auth middleware)
+- `github.com/simp-lee/rbac` - Role-based access control (RBAC middleware)  
+- `github.com/simp-lee/logger` - Structured logging (Logger/Recovery middleware)
+- `github.com/simp-lee/cache` - Response caching (Cache middleware)
 
 **Testing:**
 - `github.com/stretchr/testify` v1.11.1 - Test assertions

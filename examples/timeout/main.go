@@ -38,21 +38,19 @@ func newRouter() *gin.Engine {
 		}
 	})
 
-	// 使用链式配置：条件超时 - 不同路径不同超时和响应
+	// 使用链式配置：条件超时 - 不同路径不同超时
 	chain := ginx.NewChain().
+		// 统一错误响应格式
+		WithErrorFormat(func(status int, msg string) any {
+			return gin.H{"code": status, "message": msg}
+		}).
 		// 重型API使用长超时（60秒）
 		When(ginx.PathHasPrefix("/api/heavy"), ginx.Timeout(
 			ginx.WithTimeout(60*time.Second),
-			ginx.WithTimeoutMessage("重型任务处理超时，请稍后重试"),
 		)).
 		// 慢接口使用中等超时（10秒）
 		When(ginx.PathIs("/slow"), ginx.Timeout(
 			ginx.WithTimeout(10*time.Second),
-			ginx.WithTimeoutResponse(gin.H{
-				"error":   "服务器处理超时",
-				"message": "请稍后重试",
-				"code":    408,
-			}),
 		)).
 		// 其他接口使用短超时（5秒）
 		Unless(ginx.Or(
@@ -80,21 +78,25 @@ func newRouter() *gin.Engine {
 
 	// 展示在业务逻辑中使用 IsTimeout helper
 	r.GET("/check-timeout", func(c *gin.Context) {
-		// 模拟一些处理
-		time.Sleep(3 * time.Second)
+		ctx := c.Request.Context()
 
-		// 在处理过程中检查是否已经超时
-		if ginx.IsTimeout(c) {
-			log.Println("检测到请求已超时，提前退出处理")
+		// 使用 Request.Context().Done() 检测当前处理流程是否已超时/取消
+		select {
+		case <-time.After(3 * time.Second):
+		case <-ctx.Done():
+			log.Println("请求已取消或超时，提前退出处理")
 			return
 		}
 
-		// 模拟更多处理
-		time.Sleep(3 * time.Second)
+		select {
+		case <-time.After(3 * time.Second):
+		case <-ctx.Done():
+			log.Println("请求已取消或超时，提前退出处理")
+			return
+		}
 
 		c.JSON(200, gin.H{
 			"message": "处理完成",
-			"timeout": ginx.IsTimeout(c),
 		})
 	})
 

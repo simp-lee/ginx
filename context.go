@@ -21,6 +21,7 @@ const (
 	tokenExpiresAtKey contextKey = "ginx.token_expires_at"
 	tokenIssuedAtKey  contextKey = "ginx.token_issued_at"
 	requestIDKey      contextKey = "ginx.request_id"
+	errorFormatterKey contextKey = "ginx.error_formatter"
 )
 
 // ============================================================================
@@ -145,8 +146,43 @@ func GetRequestID(c *gin.Context) (string, bool) {
 func GetUserIDOrAbort(c *gin.Context) (string, bool) {
 	userID, exists := GetUserID(c)
 	if !exists {
-		c.AbortWithStatusJSON(401, gin.H{"error": "user not authenticated"})
+		AbortWithError(c, 401, "user not authenticated")
 		return "", false
 	}
 	return userID, true
+}
+
+// ============================================================================
+// Error Formatting Helpers
+// ============================================================================
+
+// SetErrorFormatter sets the ErrorFormatter in the context.
+func SetErrorFormatter(c *gin.Context, f ErrorFormatter) {
+	c.Set(string(errorFormatterKey), f)
+}
+
+// GetErrorFormatter gets the ErrorFormatter from the context. Returns nil if not set.
+func GetErrorFormatter(c *gin.Context) ErrorFormatter {
+	value, exists := c.Get(string(errorFormatterKey))
+	if !exists {
+		return nil
+	}
+	if f, ok := value.(ErrorFormatter); ok {
+		return f
+	}
+	return nil
+}
+
+// AbortWithError writes an error response using the ErrorFormatter if set,
+// otherwise falls back to gin.H{"error": message}.
+//
+// Note: Unlike gin.Context.AbortWithError which takes an error value and
+// appends to ctx.Errors without writing a JSON body, this function writes
+// a JSON response immediately and aborts the chain.
+func AbortWithError(c *gin.Context, statusCode int, message string) {
+	if f := GetErrorFormatter(c); f != nil {
+		c.AbortWithStatusJSON(statusCode, f(statusCode, message))
+	} else {
+		c.AbortWithStatusJSON(statusCode, gin.H{"error": message})
+	}
 }

@@ -29,12 +29,12 @@ func requirePermission(service rbac.Service, resource, action, denyMsg string, c
 
 			hasPermission, err := checkFn(service, userID, resource, action)
 			if err != nil {
-				c.AbortWithStatusJSON(500, gin.H{"error": "permission check failed"})
+				AbortWithError(c, 500, "permission check failed")
 				return
 			}
 
 			if !hasPermission {
-				c.AbortWithStatusJSON(403, gin.H{"error": denyMsg})
+				AbortWithError(c, 403, denyMsg)
 				return
 			}
 

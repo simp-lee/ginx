@@ -57,17 +57,13 @@ func TestTimeoutMiddleware(t *testing.T) {
 
 		assert.Equal(t, 408, w.Code)
 		assert.Contains(t, w.Body.String(), "request timeout")
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 	})
 
-	t.Run("custom timeout response", func(t *testing.T) {
+	t.Run("timeout with default response", func(t *testing.T) {
 		r := gin.New()
-		customResponse := gin.H{
-			"error": "Request took too long",
-			"code":  "TIMEOUT",
-		}
 		chain := NewChain().Use(Timeout(
-			WithTimeout(50*time.Millisecond),
-			WithTimeoutResponse(customResponse),
+			WithTimeout(50 * time.Millisecond),
 		))
 		r.Use(chain.Build())
 		r.GET("/test", func(c *gin.Context) {
@@ -84,32 +80,8 @@ func TestTimeoutMiddleware(t *testing.T) {
 		r.ServeHTTP(w, req)
 
 		assert.Equal(t, 408, w.Code)
-		assert.Contains(t, w.Body.String(), "Request took too long")
-		assert.Contains(t, w.Body.String(), "TIMEOUT")
-	})
-
-	t.Run("custom timeout message", func(t *testing.T) {
-		r := gin.New()
-		chain := NewChain().Use(Timeout(
-			WithTimeout(50*time.Millisecond),
-			WithTimeoutMessage("Service temporarily unavailable"),
-		))
-		r.Use(chain.Build())
-		r.GET("/test", func(c *gin.Context) {
-			select {
-			case <-time.After(100 * time.Millisecond):
-				c.JSON(200, gin.H{"message": "success"})
-			case <-c.Request.Context().Done():
-				return
-			}
-		})
-
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", "/test", nil)
-		r.ServeHTTP(w, req)
-
-		assert.Equal(t, 408, w.Code)
-		assert.Contains(t, w.Body.String(), "Service temporarily unavailable")
+		assert.Contains(t, w.Body.String(), "request timeout")
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 	})
 
 	t.Run("default timeout configuration", func(t *testing.T) {
@@ -176,11 +148,7 @@ func TestTimeoutMiddleware(t *testing.T) {
 		})
 
 		chain := NewChain().Use(Timeout(
-			WithTimeout(50*time.Millisecond),
-			WithTimeoutResponse(gin.H{
-				"code":    408,
-				"message": "timeout",
-			}),
+			WithTimeout(50 * time.Millisecond),
 		))
 		r.Use(chain.Build())
 
@@ -221,7 +189,8 @@ func TestTimeoutMiddleware(t *testing.T) {
 
 		// Verify actual response content
 		assert.Contains(t, w.Body.String(), "timeout")
-		assert.Contains(t, w.Body.String(), "408")
+		assert.Contains(t, w.Body.String(), "error")
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 	})
 
 	t.Run("timeout response clears stale entity headers", func(t *testing.T) {
@@ -303,6 +272,7 @@ func TestTimeoutInChain(t *testing.T) {
 
 		assert.Equal(t, 408, w.Code)
 		assert.Contains(t, w.Body.String(), "request timeout")
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 	})
 }
 
@@ -349,6 +319,9 @@ func TestTimeoutConcurrency(t *testing.T) {
 				}
 
 				r.ServeHTTP(w, req)
+				if w.Code == 408 {
+					assert.Equal(t, "true", w.Header().Get("X-Timeout"))
+				}
 				results <- struct {
 					code int
 					body string
@@ -401,6 +374,7 @@ func TestTimeoutConcurrency(t *testing.T) {
 
 			// Should be a timeout response because handler takes 75ms > 50ms timeout
 			assert.Equal(t, 408, w.Code)
+			assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 		}
 	})
 
@@ -617,6 +591,7 @@ func TestTimeoutEdgeCases(t *testing.T) {
 
 		// Zero timeout should immediately timeout
 		assert.Equal(t, 408, w.Code)
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 	})
 
 	t.Run("negative timeout", func(t *testing.T) {
@@ -633,6 +608,7 @@ func TestTimeoutEdgeCases(t *testing.T) {
 
 		// Negative timeout should immediately timeout
 		assert.Equal(t, 408, w.Code)
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 	})
 
 	t.Run("very long timeout", func(t *testing.T) {
@@ -753,15 +729,10 @@ func TestIsTimeout(t *testing.T) {
 		assert.False(t, isTimeoutResult, "IsTimeout should return false for normal requests")
 	})
 
-	t.Run("IsTimeout with custom timeout response", func(t *testing.T) {
+	t.Run("IsTimeout with default timeout response", func(t *testing.T) {
 		r := gin.New()
-		customResponse := gin.H{
-			"error": "Request timeout occurred",
-			"code":  "TIMEOUT_ERROR",
-		}
 		chain := NewChain().Use(Timeout(
-			WithTimeout(50*time.Millisecond),
-			WithTimeoutResponse(customResponse),
+			WithTimeout(50 * time.Millisecond),
 		))
 		r.Use(chain.Build())
 		r.GET("/test", func(c *gin.Context) {
@@ -779,8 +750,7 @@ func TestIsTimeout(t *testing.T) {
 
 		// Verify timeout response
 		assert.Equal(t, 408, w.Code)
-		assert.Contains(t, w.Body.String(), "Request timeout occurred")
-		assert.Contains(t, w.Body.String(), "TIMEOUT_ERROR")
+		assert.Contains(t, w.Body.String(), "request timeout")
 
 		// Verify timeout header
 		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
@@ -838,7 +808,9 @@ func TestTimeoutChain(t *testing.T) {
 	t.Run("recovery works with timeout in chain", func(t *testing.T) {
 		var panicCaught bool
 
-		// Custom recovery that sets a flag
+		// Custom recovery that sets a flag.
+		// Intentionally uses raw AbortWithStatusJSON (not ginx.AbortWithError) to simulate
+		// a third-party/user-provided recovery handler that doesn't depend on ginx helpers.
 		customRecovery := func(next gin.HandlerFunc) gin.HandlerFunc {
 			return func(c *gin.Context) {
 				defer func() {
@@ -985,6 +957,7 @@ func TestTimeoutPreemption(t *testing.T) {
 			r.ServeHTTP(w, req)
 		})
 		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 
 		assert.Eventually(t, func() bool {
 			errorMu.Lock()
@@ -1023,6 +996,7 @@ func TestTimeoutPreemption(t *testing.T) {
 
 		assert.Equal(t, 408, w.Code, "Should timeout even when handler ignores context")
 		assert.Contains(t, w.Body.String(), "request timeout")
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 		assert.Less(t, elapsed, 90*time.Millisecond, "Response should return near timeout deadline")
 
 		t.Log("✓ CPU intensive handler timed out near deadline")
@@ -1066,6 +1040,7 @@ func TestTimeoutPreemption(t *testing.T) {
 		assert.Equal(t, 408, w.Code, "Should timeout with cooperative handler")
 		assert.Less(t, elapsed, 120*time.Millisecond, "Should timeout relatively quickly")
 		assert.Contains(t, w.Body.String(), "request timeout")
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 
 		t.Log("✓ Database handler timed out properly with context cooperation")
 	})
@@ -1334,6 +1309,7 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 		router.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 
 		// Headers set before timeout middleware should be preserved (on originalWriter)
 		assert.Equal(t, "trace-abc123", w.Header().Get("X-Trace-ID"))
@@ -1374,6 +1350,7 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 		router.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 
 		// Security headers should all be preserved (set before timeout middleware on originalWriter)
 		assert.Equal(t, "DENY", w.Header().Get("X-Frame-Options"))
@@ -1413,7 +1390,7 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 				}
 			}).
 			// Timeout middleware
-			Use(Timeout(WithTimeout(10*time.Millisecond), WithTimeoutMessage("服务繁忙，请稍后重试"))).
+			Use(Timeout(WithTimeout(10 * time.Millisecond))).
 			// Security headers (after timeout)
 			Use(func(next gin.HandlerFunc) gin.HandlerFunc {
 				return func(c *gin.Context) {
@@ -1449,7 +1426,7 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 		assert.Equal(t, http.StatusRequestTimeout, w.Code)
 
 		// Check timeout response content
-		assert.Contains(t, w.Body.String(), "服务繁忙，请稍后重试")
+		assert.Contains(t, w.Body.String(), "request timeout")
 
 		// CORS headers should be preserved (set before timeout middleware on originalWriter)
 		assert.Equal(t, "https://app.example.com", w.Header().Get("Access-Control-Allow-Origin"))
@@ -1483,13 +1460,7 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 				}
 			}).
 			Use(Timeout(
-				WithTimeout(10*time.Millisecond),
-				WithTimeoutResponse(gin.H{
-					"error":       "timeout",
-					"code":        "TIMEOUT_ERROR",
-					"message":     "请求超时，请重试",
-					"retry_after": 5,
-				}),
+				WithTimeout(10 * time.Millisecond),
 			))
 
 		router.PUT("/api/update", chain.Build(), func(c *gin.Context) {
@@ -1503,6 +1474,7 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 		router.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 
 		// Service headers should be preserved (set before timeout middleware on originalWriter)
 		assert.Equal(t, "user-service", w.Header().Get("X-Service"))
@@ -1511,10 +1483,8 @@ func TestTimeoutHeaderPreservationComplete(t *testing.T) {
 		// Handler-set headers (X-Operation) are on bufferedWriter
 		// and not guaranteed when handler is still running at timeout.
 
-		// Custom timeout response should be returned
-		assert.Contains(t, w.Body.String(), "TIMEOUT_ERROR")
-		assert.Contains(t, w.Body.String(), "请求超时，请重试")
-		assert.Contains(t, w.Body.String(), "retry_after")
+		// Default timeout response should be returned
+		assert.Contains(t, w.Body.String(), "request timeout")
 	})
 }
 
@@ -1601,5 +1571,125 @@ func TestBufferedWriterAccessorsAndMergeHelpers(t *testing.T) {
 		bw.copyHeaders()
 		assert.Equal(t, "value", w.Header().Get("X-Custom"))
 		assert.Equal(t, "data", w.Header().Get("X-Another"))
+	})
+}
+
+// TestTimeoutErrorFormatterIntegration tests that ErrorFormatter integrates correctly with Timeout middleware.
+func TestTimeoutErrorFormatterIntegration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	customFormatter := func(status int, message string) any {
+		return gin.H{"code": status, "msg": message, "source": "custom"}
+	}
+
+	t.Run("no formatter set returns default response", func(t *testing.T) {
+		r := gin.New()
+		chain := NewChain().Use(Timeout(WithTimeout(30 * time.Millisecond)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			select {
+			case <-time.After(80 * time.Millisecond):
+				c.JSON(200, gin.H{"message": "success"})
+			case <-c.Request.Context().Done():
+				return
+			}
+		})
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+		assert.JSONEq(t, `{"error":"request timeout"}`, w.Body.String())
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
+	})
+
+	t.Run("ErrorFormat middleware wrapping Timeout produces formatted response", func(t *testing.T) {
+		r := gin.New()
+		chain := NewChain().
+			Use(ErrorFormat(customFormatter)).
+			Use(Timeout(WithTimeout(30 * time.Millisecond)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			select {
+			case <-time.After(80 * time.Millisecond):
+				c.JSON(200, gin.H{"message": "success"})
+			case <-c.Request.Context().Done():
+				return
+			}
+		})
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+		assert.JSONEq(t, `{"code":408,"msg":"request timeout","source":"custom"}`, w.Body.String())
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
+	})
+
+	t.Run("Chain.WithErrorFormat wrapping Timeout produces formatted response", func(t *testing.T) {
+		r := gin.New()
+		chain := NewChain().
+			WithErrorFormat(customFormatter).
+			Use(Timeout(WithTimeout(30 * time.Millisecond)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			select {
+			case <-time.After(80 * time.Millisecond):
+				c.JSON(200, gin.H{"message": "success"})
+			case <-c.Request.Context().Done():
+				return
+			}
+		})
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+		assert.JSONEq(t, `{"code":408,"msg":"request timeout","source":"custom"}`, w.Body.String())
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
+	})
+
+	t.Run("zero timeout with ErrorFormatter uses formatter via AbortWithError", func(t *testing.T) {
+		r := gin.New()
+		chain := NewChain().
+			WithErrorFormat(customFormatter).
+			Use(Timeout(WithTimeout(0)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			c.JSON(200, gin.H{"message": "success"})
+		})
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+		assert.JSONEq(t, `{"code":408,"msg":"request timeout","source":"custom"}`, w.Body.String())
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
+	})
+
+	t.Run("zero timeout without formatter returns default response", func(t *testing.T) {
+		r := gin.New()
+		chain := NewChain().Use(Timeout(WithTimeout(0)))
+		r.Use(chain.Build())
+
+		r.GET("/test", func(c *gin.Context) {
+			c.JSON(200, gin.H{"message": "success"})
+		})
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/test", nil)
+		r.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusRequestTimeout, w.Code)
+		assert.JSONEq(t, `{"error":"request timeout"}`, w.Body.String())
+		assert.Equal(t, "true", w.Header().Get("X-Timeout"))
 	})
 }
